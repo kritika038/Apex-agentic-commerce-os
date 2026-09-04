@@ -110,14 +110,19 @@ def test_7_cheaper_followup_preserves_category(client):
 
 # 8. High Value Transaction Governance: REQUIRES_APPROVAL
 def test_8_high_value_governance_approval(client):
-    sess = "test_sess_t8_governance"
+    import uuid
+    sess = f"test_sess_t8_governance_{uuid.uuid4().hex[:8]}"
     prods = client.get("/api/v1/products").json()
-    prod_id = prods[0]["id"]
+    in_stock_prods = [p for p in prods if p.get("in_stock") or p.get("stock_quantity", 0) > 0]
+    target_prod = in_stock_prods[0] if in_stock_prods else prods[0]
+    prod_id = target_prod["id"]
+    m_id = target_prod.get("merchant_id")
     client.post("/api/v1/cart/items", json={"session_id": sess, "product_id": prod_id, "quantity": 1})
 
     # Create intent
     intent_res = client.post("/api/v1/purchase-intents/", json={
         "session_id": sess,
+        "merchant_id": m_id,
         "buyer_id": "shopper@example.com",
         "delivery_address": {
             "full_name": "Kritika Bansal",

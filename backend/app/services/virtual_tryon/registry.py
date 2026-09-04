@@ -32,9 +32,20 @@ class VTOProviderRegistry:
             name 
             or os.environ.get("VIRTUAL_TRYON_PROVIDER") 
             or getattr(settings, "VIRTUAL_TRYON_PROVIDER", "huggingface_zerogpu")
-        ).lower().strip()
+        ).strip().strip("'\"").strip().lower()
 
-        if provider_name in ["huggingface_zerogpu", "hf_zerogpu", "huggingface", "hf", "zerogpu", "hf_space"]:
+        if provider_name in [
+            "huggingface_zerogpu",
+            "huggingface-zerogpu",
+            "hugging_face_zerogpu",
+            "hf_zerogpu",
+            "hf-zerogpu",
+            "huggingface",
+            "hf",
+            "zerogpu",
+            "hf_space",
+            "kritika68-apex-vton",
+        ]:
             key = "huggingface_zerogpu"
             if key not in cls._providers:
                 cls._providers[key] = HuggingFaceZeroGPUProvider()

@@ -20,6 +20,45 @@ from app.auth.deps import get_optional_current_user, get_current_merchant_admin
 
 router = APIRouter(prefix="/virtual-tryon", tags=["virtual-tryon"])
 
+@router.get("/health")
+@router.get("/status")
+def get_tryon_provider_health():
+    """
+    Returns public, privacy-safe Virtual Try-On service health and provider configuration.
+    Distinguishes: READY, BUSY, QUOTA_EXHAUSTED, SPACE_UNAVAILABLE, CONFIGURATION_ERROR.
+    Never exposes API secrets or internal authentication tokens.
+    """
+    raw_enabled = os.environ.get("VIRTUAL_TRYON_ENABLED")
+    if raw_enabled is not None:
+        is_enabled = raw_enabled.lower() in ["true", "1", "yes"]
+    else:
+        from app.core.config import settings
+        is_enabled = getattr(settings, "VIRTUAL_TRYON_ENABLED", True)
+
+    provider = VTOProviderRegistry.get_provider()
+    is_available = provider.is_available and is_enabled
+
+    if not is_enabled:
+        status_state = "CONFIGURATION_ERROR"
+        status_msg = "Virtual Try-On is currently disabled."
+    elif not provider.is_available or provider.provider_id == "unavailable":
+        status_state = "CONFIGURATION_ERROR"
+        status_msg = "AI Try-On configuration error."
+    else:
+        status_state = "READY"
+        status_msg = "AI Try-On"
+
+    return {
+        "status": "healthy" if is_available else "unavailable",
+        "state": status_state,
+        "message": status_msg,
+        "provider": provider.provider_id,
+        "enabled": is_enabled,
+        "configured": provider.is_available,
+        "available": is_available,
+        "is_demo": provider.is_demo
+    }
+
 @router.post("/check", response_model=TryOnEligibilityResponse)
 def check_tryon_eligibility(
     payload: TryOnEligibilityRequest,

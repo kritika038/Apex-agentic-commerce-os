@@ -188,18 +188,14 @@ def read_products(
     deduped_products: List[Product] = []
 
     for p in raw_products:
-        norm_name = p.name.lower().strip()
-        norm_brand = (p.brand or "").lower().strip()
+        norm_name = (p.name or "").lower().strip()
         
         # Strip synthetic/legacy variant suffixes like " (Crimson Red - XL)" if present
         base_name = norm_name
         if " (" in base_name and base_name.endswith(")"):
             base_name = base_name.split(" (")[0].strip()
 
-        family_key = (
-            p.variant_group_id
-            or (f"{norm_brand}::{base_name}" if norm_brand else base_name)
-        )
+        family_key = base_name
         if family_key not in seen_families:
             seen_families.add(family_key)
             deduped_products.append(p)

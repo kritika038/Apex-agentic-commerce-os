@@ -13,3 +13,4 @@ passlib[bcrypt]
 python-multipart
 httpx
 psycopg2-binary
+requests

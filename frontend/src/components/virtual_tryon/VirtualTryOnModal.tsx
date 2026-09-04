@@ -60,6 +60,15 @@ export function VirtualTryOnModal({
   const [jobData, setJobData] = useState<TryOnJobStatusResponse | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isSubmittingRef = useRef<boolean>(false);
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  const clearExistingPoll = () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+  };
 
   // Reset state when opening/switching product
   useEffect(() => {
@@ -71,14 +80,23 @@ export function VirtualTryOnModal({
       setConsentGiven(false);
       setErrorMessage(null);
       setJobData(null);
+      setLoading(false);
+      isSubmittingRef.current = false;
     } else {
+      clearExistingPoll();
       setErrorMessage(null);
+      setLoading(false);
+      isSubmittingRef.current = false;
     }
+    return () => {
+      clearExistingPoll();
+    };
   }, [isOpen, product?.id]);
 
   if (!isOpen || !product) return null;
 
   const handleTabSwitch = (mode: VtoTabMode) => {
+    if (loading || isSubmittingRef.current) return;
     setTabMode(mode);
     setErrorMessage(null);
     if (mode === 'camera') {
@@ -114,6 +132,13 @@ export function VirtualTryOnModal({
   };
 
   const processTryOnJob = async (fileToProcess: File) => {
+    // Client-side locking: prevent concurrent double-clicks and repeated requests
+    if (isSubmittingRef.current || loading) {
+      return;
+    }
+
+    isSubmittingRef.current = true;
+    clearExistingPoll();
     setModalState('processing');
     setLoading(true);
     setErrorMessage(null);
@@ -136,7 +161,7 @@ export function VirtualTryOnModal({
 
       // Poll job status with real progress streaming
       let attempts = 0;
-      const pollInterval = setInterval(async () => {
+      pollIntervalRef.current = setInterval(async () => {
         attempts++;
         try {
           const statusRes = await apiClient.get<TryOnJobStatusResponse>(
@@ -145,36 +170,43 @@ export function VirtualTryOnModal({
           setJobData(statusRes.data);
 
           if (statusRes.data.status === 'COMPLETED') {
-            clearInterval(pollInterval);
+            clearExistingPoll();
             setModalState('result');
             setLoading(false);
+            isSubmittingRef.current = false;
           } else if (statusRes.data.status === 'FAILED' || statusRes.data.status === 'CANCELLED') {
-            clearInterval(pollInterval);
+            clearExistingPoll();
             setErrorMessage(statusRes.data.error_message || 'Virtual try-on synthesis failed.');
             setModalState('error');
             setLoading(false);
-          } else if (attempts > 300) { // 10 minutes timeout
-            clearInterval(pollInterval);
+            isSubmittingRef.current = false;
+          } else if (attempts > 300) { // 5 minutes timeout
+            clearExistingPoll();
             setErrorMessage('Try-on synthesis took longer than expected. Please try again.');
             setModalState('error');
             setLoading(false);
+            isSubmittingRef.current = false;
           }
         } catch (err: unknown) {
-          clearInterval(pollInterval);
+          clearExistingPoll();
           setErrorMessage(extractErrorMessage(err, 'Failed to retrieve try-on preview.'));
           setModalState('error');
           setLoading(false);
+          isSubmittingRef.current = false;
         }
       }, 1000);
 
     } catch (err: unknown) {
+      clearExistingPoll();
       setErrorMessage(extractErrorMessage(err, 'Failed to start virtual try-on.'));
       setModalState('error');
       setLoading(false);
+      isSubmittingRef.current = false;
     }
   };
 
   const handleCapturedFromCamera = (capturedFile: File) => {
+    if (isSubmittingRef.current || loading) return;
     setSelectedFile(capturedFile);
     setPreviewUrl(URL.createObjectURL(capturedFile));
     setConsentGiven(true);
@@ -182,7 +214,7 @@ export function VirtualTryOnModal({
   };
 
   const handleGenerateTryOn = async () => {
-    if (!selectedFile || !consentGiven) return;
+    if (!selectedFile || !consentGiven || isSubmittingRef.current || loading) return;
     processTryOnJob(selectedFile);
   };
 

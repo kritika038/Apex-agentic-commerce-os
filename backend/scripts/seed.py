@@ -82,10 +82,30 @@ def seed_db(reset: bool = False) -> dict:
                 hashed_password=get_password_hash("password123"),
                 full_name="Merchant Admin",
                 merchant_id=merchant.id,
-                role="merchant_admin"
+                role="merchant_admin",
+                is_active=True
             )
             db.add(admin_user)
             stats["users_created"] += 1
+
+        # Demo Merchant account for competition / judging
+        demo_merchant = db.query(User).filter(User.email == "demo-merchant@apex.test").first()
+        if not demo_merchant:
+            demo_merchant = User(
+                email="demo-merchant@apex.test",
+                hashed_password=get_password_hash("ApexDemo@2026"),
+                full_name="Apex Demo Merchant",
+                merchant_id=merchant.id,
+                role="merchant_admin",
+                is_active=True
+            )
+            db.add(demo_merchant)
+            stats["users_created"] += 1
+        else:
+            demo_merchant.role = "merchant_admin"
+            demo_merchant.hashed_password = get_password_hash("ApexDemo@2026")
+            demo_merchant.merchant_id = merchant.id
+            demo_merchant.is_active = True
 
         customer_user = db.query(User).filter(User.email == "customer@demo-sports.test").first()
         if not customer_user:
@@ -94,7 +114,8 @@ def seed_db(reset: bool = False) -> dict:
                 hashed_password=get_password_hash("password123"),
                 full_name="Alex Customer",
                 merchant_id=merchant.id,
-                role="customer"
+                role="customer",
+                is_active=True
             )
             db.add(customer_user)
             stats["users_created"] += 1
@@ -102,6 +123,8 @@ def seed_db(reset: bool = False) -> dict:
         db.commit()
         if admin_user:
             db.refresh(admin_user)
+        if demo_merchant:
+            db.refresh(demo_merchant)
 
         # 3. Create or verify External Stores Registry
         stores_data = [

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -27,6 +28,7 @@ export function AuthModal({
   authConfig,
   onSuccess,
 }: AuthModalProps) {
+  const router = useRouter();
   const [authType, setAuthType] = useState<'customer' | 'merchant'>('customer');
   const [mode, setMode] = useState<'signin' | 'register'>('signin');
   const [email, setEmail] = useState('');
@@ -74,6 +76,9 @@ export function AuthModal({
         localStorage.setItem('user_profile', JSON.stringify(user));
         onSuccess(user, access_token);
         onClose();
+        if (user.role === 'merchant_admin') {
+          router.push('/dashboard');
+        }
       } else {
         const res = await apiClient.post('/auth/register', {
           email,
@@ -85,6 +90,9 @@ export function AuthModal({
         localStorage.setItem('user_profile', JSON.stringify(user));
         onSuccess(user, access_token);
         onClose();
+        if (user.role === 'merchant_admin') {
+          router.push('/dashboard');
+        }
       }
     } catch (err: unknown) {
       setError(extractErrorMessage(err, 'Authentication failed. Please check your credentials.'));
@@ -103,6 +111,9 @@ export function AuthModal({
       localStorage.setItem('user_profile', JSON.stringify(user));
       onSuccess(user, access_token);
       onClose();
+      if (user.role === 'merchant_admin') {
+        router.push('/dashboard');
+      }
     } catch {
       setError('Developer login is disabled in this environment.');
     } finally {
@@ -228,6 +239,46 @@ export function AuthModal({
           <div className="flex-1 h-px bg-slate-800" />
         </div>
 
+        {/* Demo Merchant Credentials Box (Merchant Tab Only) */}
+        {authType === 'merchant' && (
+          <div className="rounded-xl border border-indigo-500/30 bg-gradient-to-br from-indigo-950/60 to-slate-950 p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide uppercase bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                ⚡ Competition Demo Account
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail('demo-merchant@apex.test');
+                  setPassword('ApexDemo@2026');
+                  setError(null);
+                }}
+                className="text-[11px] font-bold text-indigo-300 hover:text-white bg-indigo-600/40 hover:bg-indigo-600 px-2.5 py-1 rounded-lg border border-indigo-500/50 transition-all shadow-xs flex items-center gap-1 cursor-pointer active:scale-95"
+              >
+                Use Demo Credentials →
+              </button>
+            </div>
+
+            <div className="space-y-0.5">
+              <div className="text-xs font-semibold text-white">Demo Merchant Credentials</div>
+              <p className="text-[11px] text-slate-400 leading-snug">
+                Use these credentials to explore the merchant console with live catalog, inventory risk alerts, governance policies, and audit ledger.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono text-[11px]">
+              <div className="flex items-center justify-between bg-slate-900/90 px-2.5 py-1.5 rounded-lg border border-slate-800">
+                <span className="text-slate-400 font-sans text-[10px]">User ID:</span>
+                <span className="text-indigo-200 font-semibold select-all">demo-merchant@apex.test</span>
+              </div>
+              <div className="flex items-center justify-between bg-slate-900/90 px-2.5 py-1.5 rounded-lg border border-slate-800">
+                <span className="text-slate-400 font-sans text-[10px]">Password:</span>
+                <span className="text-indigo-200 font-semibold select-all">ApexDemo@2026</span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Email & Password Form */}
         <form onSubmit={handleEmailPasswordSubmit} className="space-y-3">
           {authType === 'customer' && mode === 'register' && (
@@ -244,7 +295,7 @@ export function AuthModal({
           <Input
             label="Email Address"
             type="email"
-            placeholder={authType === 'merchant' ? 'admin@demo-sports.test' : 'customer@example.com'}
+            placeholder={authType === 'merchant' ? 'demo-merchant@apex.test' : 'customer@example.com'}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
@@ -254,7 +305,7 @@ export function AuthModal({
           <Input
             label="Password"
             type="password"
-            placeholder="••••••••"
+            placeholder={authType === 'merchant' ? 'ApexDemo@2026' : '••••••••'}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required

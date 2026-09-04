@@ -106,15 +106,37 @@ try:
 except Exception:
     pass
 
-# Ensure database has initial catalog on startup (critical for fresh Render PostgreSQL deployments)
+# Ensure database has initial catalog and demo merchant on startup (critical for fresh Render PostgreSQL deployments)
 try:
     from app.database.session import SessionLocal
     from app.database.models.product import Product
+    from app.database.models.user import User
+    from app.database.models.merchant import Merchant
+    from app.core.security import get_password_hash
     from scripts.seed import seed_db
 
     _init_db = SessionLocal()
     if _init_db.query(Product).count() == 0:
         seed_db(reset=False)
+    else:
+        # Ensure demo-merchant user exists on every startup if missing
+        demo_m = _init_db.query(User).filter(User.email == "demo-merchant@apex.test").first()
+        primary_merchant = _init_db.query(Merchant).first()
+        if not demo_m and primary_merchant:
+            demo_m = User(
+                email="demo-merchant@apex.test",
+                hashed_password=get_password_hash("ApexDemo@2026"),
+                full_name="Apex Demo Merchant",
+                merchant_id=primary_merchant.id,
+                role="merchant_admin",
+                is_active=True
+            )
+            _init_db.add(demo_m)
+            _init_db.commit()
+        elif demo_m and (demo_m.role != "merchant_admin" or not demo_m.is_active):
+            demo_m.role = "merchant_admin"
+            demo_m.is_active = True
+            _init_db.commit()
     _init_db.close()
 except Exception:
     pass

@@ -74,6 +74,7 @@ interface CheckoutNegotiationResponse {
   payment_window_seconds: number;
   expires_at?: string;
   key_id?: string;
+  razorpay_key_id?: string;
 }
 
 export const NegotiationModal: React.FC<NegotiationModalProps> = ({
@@ -217,18 +218,46 @@ export const NegotiationModal: React.FC<NegotiationModalProps> = ({
         return;
       }
 
-      // 3. Launch official Razorpay standard modal
+      // 3. Resolve authoritative Razorpay Public Key ID
+      const keyId =
+        checkoutRes.razorpay_key_id ||
+        checkoutRes.key_id ||
+        process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID;
+
+      if (!keyId) {
+        setError('Online payment is unavailable because Razorpay Public Key is not configured on the backend.');
+        return;
+      }
+
+      // 4. Launch official Razorpay standard modal
       const options: RazorpayCheckoutOptions = {
-        key: checkoutRes.key_id || 'rzp_test_ApexSports2026',
+        key: keyId,
         amount: checkoutRes.amount_paise,
         currency: checkoutRes.currency || 'INR',
         name: 'Apex Sports',
         description: `Negotiated Order • ${activeOffer.offer_code}`,
         order_id: checkoutRes.razorpay_order_id,
         handler: async (paymentResponse) => {
-          setIsPaid(true);
-          setPaidOrderId(paymentResponse.razorpay_order_id || checkoutRes.razorpay_order_id);
-          if (onOrderCompleted) onOrderCompleted(paymentResponse.razorpay_order_id);
+          try {
+            // Step 5: Verify Cryptographic Signature on Backend
+            await apiClient.post('/payments/verify-signature', {
+              razorpay_order_id: paymentResponse.razorpay_order_id || checkoutRes.razorpay_order_id,
+              razorpay_payment_id: paymentResponse.razorpay_payment_id,
+              razorpay_signature: paymentResponse.razorpay_signature,
+            });
+
+            const confirmedOrderId = paymentResponse.razorpay_order_id || checkoutRes.razorpay_order_id;
+            setIsPaid(true);
+            setPaidOrderId(confirmedOrderId);
+            if (onOrderCompleted) onOrderCompleted(confirmedOrderId);
+          } catch (verifyErr: unknown) {
+            console.error('[NEGOTIATION] Signature verification error:', verifyErr);
+            const safeVerifyError = extractErrorMessage(
+              verifyErr,
+              'Payment signature verification failed. The payment response was not authentic.'
+            );
+            setError(safeVerifyError);
+          }
         },
         prefill: {
           email: customerEmail,
@@ -245,6 +274,13 @@ export const NegotiationModal: React.FC<NegotiationModalProps> = ({
       };
 
       const rzp = new window.Razorpay(options);
+      rzp.on('payment.failed', (response: { error: { description?: string; reason?: string } }) => {
+        setError(
+          response?.error?.description ||
+          response?.error?.reason ||
+          'Payment failed or was cancelled on Razorpay gateway.'
+        );
+      });
       rzp.open();
     } catch (err: unknown) {
       setError(extractErrorMessage(err, 'Payment initialization failed.'));

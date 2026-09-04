@@ -787,3 +787,154 @@ def test_security_25_nonexistent_offer_404(client, db, test_setup):
     """Security Check 25: Querying nonexistent offer returns 404."""
     resp = client.get("/api/v1/negotiation/nonexistent_offer_id_99999")
     assert resp.status_code == 404
+
+
+def test_security_26_negotiated_checkout_key_resolution(client, db, test_setup, monkeypatch):
+    """
+    Test 26: Negotiated checkout returns server-configured settings.RAZORPAY_KEY_ID
+    and contains NO hardcoded 'rzp_test_ApexSports2026'.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "RAZORPAY_KEY_ID", "rzp_test_LiveTestKey999")
+    monkeypatch.setattr(settings, "RAZORPAY_KEY_SECRET", "secret_live_test_123")
+
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 1, "requested_unit_price": 4900.00, "customer_id": "cust_sec26"}
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    # Customer accepts
+    client.post(f"/api/v1/negotiation/{offer_id}/accept", json={"customer_id": "cust_sec26"})
+
+    # Checkout
+    checkout_resp = client.post(f"/api/v1/negotiation/{offer_id}/checkout", json={"customer_id": "cust_sec26"})
+    assert checkout_resp.status_code == 200
+    data = checkout_resp.json()
+
+    assert data["key_id"] == "rzp_test_LiveTestKey999"
+    assert data["razorpay_key_id"] == "rzp_test_LiveTestKey999"
+    assert data["key_id"] != "rzp_test_ApexSports2026"
+    assert data["amount_paise"] == 490000
+    assert data["amount"] == 4900.00
+    assert data["razorpay_order_id"] is not None
+
+
+def test_security_27_valid_negotiated_signature_verification_flow(client, db, test_setup, monkeypatch):
+    """
+    Test 27: Valid negotiated payment signature verification transitions:
+      PaymentTransaction -> CAPTURED
+      NegotiatedOffer -> ORDER_CONFIRMED
+      PurchaseIntent -> COMPLETED
+    """
+    from app.core.config import settings
+    from app.database.models.payment_transaction import PaymentTransaction
+    from app.database.models.purchase_intent import PurchaseIntent
+
+    monkeypatch.setattr(settings, "RAZORPAY_KEY_ID", "rzp_test_LiveKey27")
+    monkeypatch.setattr(settings, "RAZORPAY_KEY_SECRET", "test_secret_key_27")
+    monkeypatch.setattr(settings, "PAYMENT_PROVIDER", "mock")
+
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 1, "requested_unit_price": 4900.00, "customer_id": "cust_sec27"}
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    client.post(f"/api/v1/negotiation/{offer_id}/accept", json={"customer_id": "cust_sec27"})
+    checkout_resp = client.post(f"/api/v1/negotiation/{offer_id}/checkout", json={"customer_id": "cust_sec27"})
+    order_id = checkout_resp.json()["razorpay_order_id"]
+
+    payment_id = "pay_test_negotiated_123"
+    valid_sig = "sig_test_verified_123"
+
+    # Call /payments/verify-signature
+    verify_resp = client.post("/api/v1/payments/verify-signature", json={
+        "razorpay_order_id": order_id,
+        "razorpay_payment_id": payment_id,
+        "razorpay_signature": valid_sig
+    })
+    assert verify_resp.status_code == 200
+    tx_data = verify_resp.json()
+    assert tx_data["status"] == "CAPTURED"
+    assert tx_data["razorpay_payment_id"] == payment_id
+
+    # Verify DB state of offer and purchase intent
+    offer = db.query(NegotiatedOffer).filter(NegotiatedOffer.id == offer_id).first()
+    assert offer.status == "ORDER_CONFIRMED"
+    assert offer.order_id is not None
+
+    intent = db.query(PurchaseIntent).filter(PurchaseIntent.id == offer.negotiation_id).first()
+    if intent:
+        assert intent.status == "COMPLETED"
+
+
+def test_security_28_invalid_signature_rejected(client, db, test_setup, monkeypatch):
+    """
+    Test 28: Invalid signature on negotiated payment order returns HTTP 400.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "RAZORPAY_KEY_ID", "rzp_test_LiveKey28")
+    monkeypatch.setattr(settings, "RAZORPAY_KEY_SECRET", "test_secret_key_28")
+    monkeypatch.setattr(settings, "PAYMENT_PROVIDER", "mock")
+
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 1, "requested_unit_price": 4900.00, "customer_id": "cust_sec28"}
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    client.post(f"/api/v1/negotiation/{offer_id}/accept", json={"customer_id": "cust_sec28"})
+    checkout_resp = client.post(f"/api/v1/negotiation/{offer_id}/checkout", json={"customer_id": "cust_sec28"})
+    order_id = checkout_resp.json()["razorpay_order_id"]
+
+    # Forged signature (not matching sig_ prefix or HMAC)
+    verify_resp = client.post("/api/v1/payments/verify-signature", json={
+        "razorpay_order_id": order_id,
+        "razorpay_payment_id": "pay_forged_999",
+        "razorpay_signature": "bad_forged_signature_123"
+    })
+    assert verify_resp.status_code == 400
+    assert "signature verification failed" in verify_resp.json()["detail"].lower()
+
+
+def test_security_29_expired_offer_cannot_be_checked_out(client, db, test_setup):
+    """
+    Test 29: Expired offer cannot be checked out.
+    """
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 1, "requested_unit_price": 4900.00, "customer_id": "cust_sec29"}
+    )
+    offer_id = resp.json()["offer"]["id"]
+    client.post(f"/api/v1/negotiation/{offer_id}/accept", json={"customer_id": "cust_sec29"})
+
+    # Manually expire the offer
+    offer = db.query(NegotiatedOffer).filter(NegotiatedOffer.id == offer_id).first()
+    offer.expires_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    db.commit()
+
+    checkout_resp = client.post(f"/api/v1/negotiation/{offer_id}/checkout", json={"customer_id": "cust_sec29"})
+    assert checkout_resp.status_code in [400, 500]
+    assert "expired" in checkout_resp.text.lower()
+
+
+def test_security_30_unapproved_offer_cannot_be_checked_out(client, db, test_setup):
+    """
+    Test 30: Unapproved human-approval offer cannot be checked out before merchant approval.
+    """
+    # 4% discount requires human approval
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 1, "requested_unit_price": 4800.00, "customer_id": "cust_sec30"}
+    )
+    offer_id = resp.json()["offer"]["id"]
+    assert resp.json()["status"] == NegotiationState.HUMAN_APPROVAL_REQUIRED.value
+
+    # Attempt to checkout directly without approval
+    checkout_resp = client.post(f"/api/v1/negotiation/{offer_id}/checkout", json={"customer_id": "cust_sec30"})
+    assert checkout_resp.status_code in [400, 500]
+    assert "accepted before checking out" in checkout_resp.text.lower()
+

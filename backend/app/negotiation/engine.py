@@ -26,6 +26,7 @@ from app.negotiation.state_machine import NegotiationStateMachine, NegotiationSt
 from app.services.audit_service import AuditService
 from app.payments.service import PaymentService
 from app.payments.state_machine import PaymentState
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -974,6 +975,14 @@ class NegotiationEngine:
             db.commit()
             raise ValueError("Offer has expired and cannot be paid.")
 
+        is_razorpay_configured = bool(
+            settings.RAZORPAY_KEY_ID
+            and settings.RAZORPAY_KEY_SECRET
+            and not settings.RAZORPAY_KEY_ID.startswith("your_")
+            and not "xxxx" in settings.RAZORPAY_KEY_ID
+        )
+        public_key_id = settings.RAZORPAY_KEY_ID if is_razorpay_configured else None
+
         # Idempotent replay if already generated order
         if (offer.status == NegotiationState.PAYMENT_PENDING.value or offer.status == NegotiationState.CUSTOMER_ACCEPTED.value) and offer.payment_order_id:
             return {
@@ -983,7 +992,8 @@ class NegotiationEngine:
                 "amount": float(offer.final_total),
                 "amount_paise": int(offer.final_total * 100),
                 "currency": offer.currency,
-                "key_id": "rzp_test_ApexSports2026",
+                "key_id": public_key_id,
+                "razorpay_key_id": public_key_id,
                 "status": "payment_ready"
             }
 
@@ -1119,6 +1129,7 @@ class NegotiationEngine:
             "amount": float(offer.final_total),
             "amount_paise": int(offer.final_total * 100),
             "currency": offer.currency,
-            "key_id": "rzp_test_ApexSports2026",
+            "key_id": public_key_id,
+            "razorpay_key_id": public_key_id,
             "status": "payment_ready"
         }

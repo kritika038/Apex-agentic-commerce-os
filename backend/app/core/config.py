@@ -41,7 +41,9 @@ class Settings(BaseSettings):
 
     # Virtual Try-On Configuration
     VIRTUAL_TRYON_ENABLED: bool = True
-    VIRTUAL_TRYON_PROVIDER: str = "local_fashn" # "local_fashn" for local dev, "fashn" for production Render
+    VIRTUAL_TRYON_PROVIDER: str = "huggingface_zerogpu" # "huggingface_zerogpu", "local_fashn", "fashn", "demo"
+    VTO_HF_SPACE_URL: str = "https://kritika68-apex-vton.hf.space"
+    HF_TOKEN: str = ""
     FASHN_API_KEY: str = ""
     FASHN_API_BASE_URL: str = "https://api.fashn.ai/v1"
     FASHN_MODEL_NAME: str = "tryon-v1.6"

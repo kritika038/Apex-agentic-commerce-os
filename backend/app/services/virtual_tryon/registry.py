@@ -2,6 +2,7 @@ import os
 from typing import Dict, Optional
 from app.core.config import settings
 from app.services.virtual_tryon.base import VirtualTryOnProvider
+from app.services.virtual_tryon.providers.huggingface_zerogpu import HuggingFaceZeroGPUProvider
 from app.services.virtual_tryon.providers.local_fashn import LocalFashnVTONProvider
 from app.services.virtual_tryon.providers.fashn import FashnVirtualTryOnProvider
 from app.services.virtual_tryon.providers.demo import DemoVirtualTryOnProvider
@@ -30,8 +31,14 @@ class VTOProviderRegistry:
         provider_name = (
             name 
             or os.environ.get("VIRTUAL_TRYON_PROVIDER") 
-            or getattr(settings, "VIRTUAL_TRYON_PROVIDER", "local_fashn")
+            or getattr(settings, "VIRTUAL_TRYON_PROVIDER", "huggingface_zerogpu")
         ).lower().strip()
+
+        if provider_name in ["huggingface_zerogpu", "hf_zerogpu", "huggingface", "hf", "zerogpu", "hf_space"]:
+            key = "huggingface_zerogpu"
+            if key not in cls._providers:
+                cls._providers[key] = HuggingFaceZeroGPUProvider()
+            return cls._providers[key]
 
         if provider_name in ["fashn", "hosted_fashn", "hosted", "production", "live", "tryon-v1.6"]:
             key = "fashn"

@@ -30,6 +30,8 @@ def _enrich_product(p: Product) -> ProductResponse:
     available_sizes = attrs.get("available_sizes", [])
     
     # Derive colors/sizes from variant_details or variant_images if not explicitly in attributes
+    cat_sub_name = f"{(p.category or '').lower()} {(p.subcategory or '').lower()} {(p.name or '').lower()}"
+
     if not available_colors:
         if "variant_details" in attrs and isinstance(attrs["variant_details"], dict):
             available_colors = list(attrs["variant_details"].keys())
@@ -37,9 +39,18 @@ def _enrich_product(p: Product) -> ProductResponse:
             available_colors = list(attrs["variant_images"].keys())
         elif "color" in attrs and attrs["color"]:
             available_colors = [str(attrs["color"])]
+        elif any(k in cat_sub_name for k in ["shoe", "sneaker", "cleat", "spike", "shirt", "pant", "short", "jacket", "bra", "apparel", "running", "fitness"]):
+            available_colors = ["Standard Edition"]
 
-    if not available_sizes and "size" in attrs and attrs["size"]:
-        available_sizes = [str(attrs["size"])]
+    if not available_sizes:
+        if "available_sizes" in attrs and isinstance(attrs["available_sizes"], list):
+            available_sizes = attrs["available_sizes"]
+        elif "size" in attrs and attrs["size"]:
+            available_sizes = [str(attrs["size"])]
+        elif any(k in cat_sub_name for k in ["shoe", "shoes", "sneaker", "sneakers", "spikes", "cleats", "pegasus", "ultraboost"]):
+            available_sizes = ["UK 7", "UK 8", "UK 9", "UK 10", "UK 11"]
+        elif any(k in cat_sub_name for k in ["t-shirt", "shirt", "pant", "short", "jacket", "bra", "track", "apparel", "wear", "tee"]):
+            available_sizes = ["S", "M", "L", "XL"]
 
     # Compute min and max price across variants
     min_p = p.price
@@ -89,6 +100,7 @@ def _enrich_product(p: Product) -> ProductResponse:
 @router.get("/", response_model=List[ProductResponse])
 def read_products(
     skip: int = 0, 
+    offset: Optional[int] = None,
     limit: int = 300, 
     query: Optional[str] = None,
     category: Optional[str] = None,
@@ -166,7 +178,7 @@ def read_products(
     elif sort_by == "newest":
         q = q.order_by(Product.created_at.desc())
     else:
-        q = q.order_by(Product.created_at.asc())
+        q = q.order_by(Product.created_at.asc(), Product.id.asc())
 
     raw_products = q.all()
 
@@ -176,16 +188,24 @@ def read_products(
     deduped_products: List[Product] = []
 
     for p in raw_products:
+        norm_name = p.name.lower().strip()
+        norm_brand = (p.brand or "").lower().strip()
+        
+        # Strip synthetic/legacy variant suffixes like " (Crimson Red - XL)" if present
+        base_name = norm_name
+        if " (" in base_name and base_name.endswith(")"):
+            base_name = base_name.split(" (")[0].strip()
+
         family_key = (
             p.variant_group_id
-            or (f"{p.brand.lower().strip()}:{p.model_number.lower().strip()}" if p.brand and p.model_number else None)
-            or p.name.lower().strip()
+            or (f"{norm_brand}::{base_name}" if norm_brand else base_name)
         )
         if family_key not in seen_families:
             seen_families.add(family_key)
             deduped_products.append(p)
 
-    paginated = deduped_products[skip : skip + limit]
+    actual_skip = offset if offset is not None else skip
+    paginated = deduped_products[actual_skip : actual_skip + limit]
     enriched = [_enrich_product(p) for p in paginated]
     if in_stock_only:
         enriched = [p for p in enriched if p.in_stock]

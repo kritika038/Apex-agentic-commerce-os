@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     AMAZON_MARKETPLACE: str = "www.amazon.in"
     AMAZON_CREATORS_API_HOST: str = "webservices.amazon.in"
 
+    # Virtual Try-On Configuration
+    VIRTUAL_TRYON_ENABLED: bool = True
+    VIRTUAL_TRYON_PROVIDER: str = "local_fashn" # "local_fashn" for local dev, "fashn" for production Render
+    FASHN_API_KEY: str = ""
+    FASHN_API_BASE_URL: str = "https://api.fashn.ai/v1"
+    FASHN_MODEL_NAME: str = "tryon-v1.6"
+
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]

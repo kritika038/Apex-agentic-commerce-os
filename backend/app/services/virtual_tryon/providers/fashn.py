@@ -3,6 +3,7 @@ import time
 import base64
 import requests
 from typing import Dict, Any, Optional, Tuple
+from app.core.config import settings
 from app.services.virtual_tryon.base import VirtualTryOnProvider
 
 class FashnVirtualTryOnProvider(VirtualTryOnProvider):
@@ -20,11 +21,23 @@ class FashnVirtualTryOnProvider(VirtualTryOnProvider):
         poll_interval: float = 1.5,
         max_poll_attempts: int = 30
     ):
-        self.api_key = (api_key or os.environ.get("FASHN_API_KEY", "")).strip()
-        self.base_url = (base_url or os.environ.get("FASHN_API_BASE_URL", "https://api.fashn.ai/v1")).rstrip("/")
+        self._api_key = api_key
+        self._base_url = base_url
         self.timeout = timeout
         self.poll_interval = poll_interval
         self.max_poll_attempts = max_poll_attempts
+
+    @property
+    def api_key(self) -> str:
+        if self._api_key is not None:
+            return self._api_key.strip()
+        return (os.environ.get("FASHN_API_KEY") or getattr(settings, "FASHN_API_KEY", "")).strip()
+
+    @property
+    def base_url(self) -> str:
+        if self._base_url is not None:
+            return self._base_url.rstrip("/")
+        return (os.environ.get("FASHN_API_BASE_URL") or getattr(settings, "FASHN_API_BASE_URL", "https://api.fashn.ai/v1")).rstrip("/")
 
     @property
     def provider_id(self) -> str:
@@ -86,6 +99,9 @@ class FashnVirtualTryOnProvider(VirtualTryOnProvider):
             )
 
         # 1. Format person image as base64 data URI
+        if progress_callback:
+            progress_callback("PREPARING", 15, None, None, "Preparing model and garment assets...")
+
         mime = "image/jpeg"
         if person_image_bytes.startswith(b"\x89PNG"):
             mime = "image/png"
@@ -112,6 +128,9 @@ class FashnVirtualTryOnProvider(VirtualTryOnProvider):
                 "mode": "performance"
             }
         }
+
+        if progress_callback:
+            progress_callback("UPLOADING", 30, None, None, "Submitting to FASHN AI Try-On service...")
 
         # 3. Submit prediction job
         try:
@@ -152,6 +171,8 @@ class FashnVirtualTryOnProvider(VirtualTryOnProvider):
 
             # Check if immediately completed
             if run_data.get("status") == "completed" and run_data.get("output"):
+                if progress_callback:
+                    progress_callback("FINALIZING", 95, None, None, "Downloading high-resolution result...")
                 return self._download_and_validate_output(run_data["output"][0], person_image_bytes)
 
         except requests.Timeout:
@@ -169,6 +190,9 @@ class FashnVirtualTryOnProvider(VirtualTryOnProvider):
                 f"Failed to connect to FASHN API: {str(e)}"
             )
 
+        if progress_callback:
+            progress_callback("AI_GENERATION", 45, 1, self.max_poll_attempts, "FASHN AI is synthesizing your try-on...")
+
         # 4. Status Polling Loop
         status_url = f"{self.base_url}/status/{prediction_id}"
         attempts = 0
@@ -176,6 +200,10 @@ class FashnVirtualTryOnProvider(VirtualTryOnProvider):
         while attempts < self.max_poll_attempts:
             attempts += 1
             time.sleep(self.poll_interval)
+
+            if progress_callback:
+                poll_pct = min(92, 45 + int(attempts * (47.0 / self.max_poll_attempts)))
+                progress_callback("AI_GENERATION", poll_pct, attempts, self.max_poll_attempts, f"Synthesizing try-on visual ({attempts}/{self.max_poll_attempts})...")
 
             try:
                 poll_resp = requests.get(status_url, headers=headers, timeout=15)
@@ -192,6 +220,8 @@ class FashnVirtualTryOnProvider(VirtualTryOnProvider):
                                 "EMPTY_OUTPUT",
                                 "FASHN AI completed but produced an empty output list."
                             )
+                        if progress_callback:
+                            progress_callback("FINALIZING", 95, None, None, "Downloading high-resolution result...")
                         return self._download_and_validate_output(outputs[0], person_image_bytes)
 
                     elif status == "failed":

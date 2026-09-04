@@ -23,6 +23,7 @@ from app.core.security import create_access_token
 @pytest.fixture(autouse=True)
 def configure_fashn_provider_for_test(monkeypatch):
     monkeypatch.setenv("VIRTUAL_TRYON_PROVIDER", "fashn")
+    monkeypatch.setenv("FASHN_API_KEY", "test_key_fashn")
 
 client = TestClient(app)
 
@@ -325,22 +326,21 @@ def test_selected_color_garment_image_used(vto_test_context, db_session: Session
     # When variant is Pure White, verify white garment URL is passed to provider
     with patch.object(FashnVirtualTryOnProvider, "generate_try_on") as mock_gen:
         mock_gen.return_value = (True, make_test_image_bytes(marker=b"\xdd"), None, None)
-        with patch.object(FashnVirtualTryOnProvider, "is_available", True):
-            files = {"photo": ("person.jpg", make_test_image_bytes(), "image/jpeg")}
-            data = {"product_id": shirt.id, "consent": "true", "variant_id": "Pure White-Medium"}
-            res = client.post("/api/v1/virtual-tryon/jobs", data=data, files=files, headers={"Authorization": f"Bearer {token_a}"})
+        files = {"photo": ("person.jpg", make_test_image_bytes(), "image/jpeg")}
+        data = {"product_id": shirt.id, "consent": "true", "variant_id": "Pure White-Medium"}
+        res = client.post("/api/v1/virtual-tryon/jobs", data=data, files=files, headers={"Authorization": f"Bearer {token_a}"})
             
-            assert res.status_code == 200
-            assert mock_gen.called
-            call_kwargs = mock_gen.call_args[1]
-            assert "581655353564" in call_kwargs["product_image_url"] # Pure white photo ID
+        assert res.status_code == 200
+        assert mock_gen.called
+        call_kwargs = mock_gen.call_args[1]
+        assert "581655353564" in call_kwargs["product_image_url"] # Pure white photo ID
 
 def test_cross_user_cannot_access_another_users_tryon_job(vto_test_context):
     token_a = vto_test_context["token_a"]
     token_b = vto_test_context["token_b"]
     shirt = vto_test_context["shirt"]
     
-    with patch.object(FashnVirtualTryOnProvider, "generate_try_on") as mock_gen, patch.object(FashnVirtualTryOnProvider, "is_available", True):
+    with patch.object(FashnVirtualTryOnProvider, "generate_try_on") as mock_gen:
         mock_gen.return_value = (True, make_test_image_bytes(marker=b"\xbb"), None, None)
         
         files = {"photo": ("person.jpg", make_test_image_bytes(), "image/jpeg")}
@@ -361,7 +361,7 @@ def test_no_secret_leakage_in_api_responses_or_logs(vto_test_context):
     shirt = vto_test_context["shirt"]
     token_a = vto_test_context["token_a"]
     
-    with patch.object(FashnVirtualTryOnProvider, "generate_try_on") as mock_gen, patch.object(FashnVirtualTryOnProvider, "is_available", True):
+    with patch.object(FashnVirtualTryOnProvider, "generate_try_on") as mock_gen:
         mock_gen.return_value = (True, make_test_image_bytes(marker=b"\xcc"), None, None)
         
         files = {"photo": ("person.jpg", make_test_image_bytes(), "image/jpeg")}
@@ -389,7 +389,7 @@ def test_vto_does_not_mutate_authoritative_price_or_stock(vto_test_context, db_s
     orig_price = shirt.price
     token_a = vto_test_context["token_a"]
     
-    with patch.object(FashnVirtualTryOnProvider, "generate_try_on") as mock_gen, patch.object(FashnVirtualTryOnProvider, "is_available", True):
+    with patch.object(FashnVirtualTryOnProvider, "generate_try_on") as mock_gen:
         mock_gen.return_value = (True, make_test_image_bytes(marker=b"\xee"), None, None)
         files = {"photo": ("person.jpg", make_test_image_bytes(), "image/jpeg")}
         client.post("/api/v1/virtual-tryon/jobs", data={"product_id": shirt.id, "consent": "true"}, files=files, headers={"Authorization": f"Bearer {token_a}"})
@@ -401,7 +401,7 @@ def test_tryon_job_cancellation(vto_test_context):
     token_a = vto_test_context["token_a"]
     shirt = vto_test_context["shirt"]
     
-    with patch.object(FashnVirtualTryOnProvider, "generate_try_on") as mock_gen, patch.object(FashnVirtualTryOnProvider, "is_available", True):
+    with patch.object(FashnVirtualTryOnProvider, "generate_try_on") as mock_gen:
         mock_gen.return_value = (True, make_test_image_bytes(marker=b"\xff"), None, None)
         files = {"photo": ("person.jpg", make_test_image_bytes(), "image/jpeg")}
         data = {"product_id": shirt.id, "consent": "true"}

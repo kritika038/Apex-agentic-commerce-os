@@ -170,10 +170,10 @@ def seed_db(reset: bool = False, db_session: Optional[Session] = None) -> dict:
         products_catalog = generate_marketplace_products()
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        canonical_names = {p_info["name"] for p_info in products_catalog}
-        canonical_skus = {p_info.get("sku") for p_info in products_catalog if p_info.get("sku")}
+        canonical_names = {p_info["name"].strip().lower() for p_info in products_catalog}
+        canonical_skus = {p_info.get("sku").strip().lower() for p_info in products_catalog if p_info.get("sku")}
 
-        # Safe deduplication: keep exactly 1 active record per canonical product, deactivate duplicate copies
+        # Safe deduplication: keep exactly 1 active record per canonical product, deactivate duplicate copies and leftover test fixtures
         active_existing_prods = db.query(Product).filter(
             Product.merchant_id == merchant.id,
             Product.is_active == True
@@ -184,77 +184,96 @@ def seed_db(reset: bool = False, db_session: Optional[Session] = None) -> dict:
         seen_canonical_skus = set()
 
         for ep in active_existing_prods:
-            is_canonical = (ep.name in canonical_names) or (ep.sku and ep.sku in canonical_skus)
+            norm_name = (ep.name or "").strip().lower()
+            norm_sku = (ep.sku or "").strip().lower() if ep.sku else None
+            
+            # Check if this active record is in the canonical catalog
+            is_canonical = (norm_name in canonical_names) or (norm_sku and norm_sku in canonical_skus)
+            
             if is_canonical:
-                if ep.name in seen_canonical_names or (ep.sku and ep.sku in seen_canonical_skus):
+                if norm_name in seen_canonical_names or (norm_sku and norm_sku in seen_canonical_skus):
                     ep.is_active = False
                     duplicates_consolidated += 1
                 else:
-                    seen_canonical_names.add(ep.name)
-                    if ep.sku:
-                        seen_canonical_skus.add(ep.sku)
+                    seen_canonical_names.add(norm_name)
+                    if norm_sku:
+                        seen_canonical_skus.add(norm_sku)
+            else:
+                # Non-canonical test fixture or legacy artifact: deactivate safely
+                ep.is_active = False
+                duplicates_consolidated += 1
 
         if duplicates_consolidated > 0:
             db.flush()
-            logger.info(f"Safely consolidated/deactivated {duplicates_consolidated} legacy duplicate products.")
+            logger.info(f"Safely consolidated/deactivated {duplicates_consolidated} duplicate or legacy fixture products.")
 
         # Preload active canonical products for this merchant
         existing_prods = db.query(Product).filter(
             Product.merchant_id == merchant.id,
             Product.is_active == True
         ).all()
-        existing_names = {p.name for p in existing_prods}
-        existing_skus = {p.sku for p in existing_prods if p.sku}
+        existing_map_by_name = {p.name.strip().lower(): p for p in existing_prods}
+        existing_map_by_sku = {p.sku.strip().lower(): p for p in existing_prods if p.sku}
 
         for p_info in products_catalog:
-            # Check if product already exists
             p_name = p_info["name"]
             p_sku = p_info.get("sku")
+            norm_name = p_name.strip().lower()
+            norm_sku = p_sku.strip().lower() if p_sku else None
 
-            if p_name in existing_names or (p_sku and p_sku in existing_skus):
+            existing_p = existing_map_by_name.get(norm_name) or (existing_map_by_sku.get(norm_sku) if norm_sku else None)
+
+            if existing_p:
+                # Update attributes, image, and price if changed
+                existing_p.image_url = p_info.get("image_url") or existing_p.image_url
+                existing_p.attributes = p_info.get("attributes") or existing_p.attributes
+                if not existing_p.attributes.get("image_url") and p_info.get("image_url"):
+                    existing_p.attributes["image_url"] = p_info.get("image_url")
+                existing_p.description = p_info.get("description") or existing_p.description
+                existing_p.brand = p_info.get("brand") or existing_p.brand
                 stats["products_skipped"] += 1
-                continue
+                p = existing_p
+            else:
+                # Deterministic product ID mapping for canonical items
+                custom_id = None
+                if p_name == "Pro Running Shoes":
+                    custom_id = "a5bd13a3-9d09-441d-86e0-d08d0bd29f83"
+                elif p_name == "Sports Dry-Fit T-Shirt":
+                    custom_id = "1866ffbf-0f2a-423a-8e98-d5d921a6b117"
 
-            # Deterministic product ID mapping for canonical items
-            custom_id = None
-            if p_name == "Pro Running Shoes":
-                custom_id = "a5bd13a3-9d09-441d-86e0-d08d0bd29f83"
-            elif p_name == "Sports Dry-Fit T-Shirt":
-                custom_id = "1866ffbf-0f2a-423a-8e98-d5d921a6b117"
+                p_kwargs = {
+                    "merchant_id": merchant.id,
+                    "name": p_name,
+                    "description": p_info["description"],
+                    "brand": p_info.get("brand"),
+                    "category": p_info["category"],
+                    "subcategory": p_info.get("subcategory"),
+                    "price": p_info["price"],
+                    "mrp": p_info.get("mrp"),
+                    "currency": p_info.get("currency", "INR"),
+                    "gtin": p_info.get("gtin"),
+                    "model_number": p_info.get("model_number"),
+                    "sku": p_sku,
+                    "image_url": p_info.get("image_url"),
+                    "image_urls": [p_info.get("image_url")] if p_info.get("image_url") else [],
+                    "rating": p_info.get("rating", 4.5),
+                    "review_count": p_info.get("review_count", 0),
+                    "tags": p_info.get("tags", []),
+                    "variant_group_id": p_info.get("variant_group_id"),
+                    "attributes": p_info.get("attributes") or {"image_url": p_info.get("image_url")},
+                    "is_active": True,
+                    "external_comparison_enabled": True
+                }
+                if custom_id:
+                    p_kwargs["id"] = custom_id
 
-            p_kwargs = {
-                "merchant_id": merchant.id,
-                "name": p_name,
-                "description": p_info["description"],
-                "brand": p_info.get("brand"),
-                "category": p_info["category"],
-                "subcategory": p_info.get("subcategory"),
-                "price": p_info["price"],
-                "mrp": p_info.get("mrp"),
-                "currency": p_info.get("currency", "INR"),
-                "gtin": p_info.get("gtin"),
-                "model_number": p_info.get("model_number"),
-                "sku": p_sku,
-                "image_url": p_info.get("image_url"),
-                "image_urls": [p_info.get("image_url")] if p_info.get("image_url") else [],
-                "rating": p_info.get("rating", 4.5),
-                "review_count": p_info.get("review_count", 0),
-                "tags": p_info.get("tags", []),
-                "variant_group_id": p_info.get("variant_group_id"),
-                "attributes": p_info.get("attributes") or {"image_url": p_info.get("image_url")},
-                "is_active": True,
-                "external_comparison_enabled": True
-            }
-            if custom_id:
-                p_kwargs["id"] = custom_id
-
-            p = Product(**p_kwargs)
-            db.add(p)
-            db.flush()
-            stats["products_inserted"] += 1
-            existing_names.add(p_name)
-            if p_sku:
-                existing_skus.add(p_sku)
+                p = Product(**p_kwargs)
+                db.add(p)
+                db.flush()
+                stats["products_inserted"] += 1
+                existing_map_by_name[norm_name] = p
+                if norm_sku:
+                    existing_map_by_sku[norm_sku] = p
 
             # Add inventory
             inv = db.query(Inventory).filter(Inventory.product_id == p.id, Inventory.merchant_id == merchant.id).first()
@@ -400,13 +419,42 @@ def seed_db(reset: bool = False, db_session: Optional[Session] = None) -> dict:
             )
             db.add(policy)
 
-        # 8. Create Negotiation Policy
+        # 8. Create Canonical Negotiation Policy in both tables
+        canonical_neg_policy_id = "da3fac75-b80d-4e38-b3eb-9a94dd64d242"
+
+        # A. In `policies` table (ensures PolicyEvaluation foreign key constraint is satisfied)
+        gov_neg_policy = db.query(Policy).filter(
+            (Policy.id == canonical_neg_policy_id) |
+            ((Policy.merchant_id == merchant.id) & (Policy.name == "Standard Negotiation Policy"))
+        ).first()
+        if not gov_neg_policy:
+            gov_neg_policy = Policy(
+                id=canonical_neg_policy_id,
+                merchant_id=merchant.id,
+                name="Standard Negotiation Policy",
+                version=1,
+                max_transaction_amount=Decimal("10000.00"),
+                approval_threshold=Decimal("5000.00"),
+                low_risk_limit=Decimal("2000.00"),
+                max_discount_percent=Decimal("5.00"),
+                max_quantity=5,
+                allowed_currency="INR",
+                auto_approval_enabled=True,
+                authorization_expiration_minutes=10,
+                is_active=True,
+                created_by_user_id=admin_user.id if admin_user else None
+            )
+            db.add(gov_neg_policy)
+            db.flush()
+
+        # B. In `merchant_negotiation_policies` table
         neg_policy = db.query(MerchantNegotiationPolicy).filter(
-            MerchantNegotiationPolicy.merchant_id == merchant.id,
-            MerchantNegotiationPolicy.is_active == True
+            (MerchantNegotiationPolicy.id == canonical_neg_policy_id) |
+            ((MerchantNegotiationPolicy.merchant_id == merchant.id) & (MerchantNegotiationPolicy.is_active == True))
         ).first()
         if not neg_policy:
             neg_policy = MerchantNegotiationPolicy(
+                id=canonical_neg_policy_id,
                 merchant_id=merchant.id,
                 tenant_id=merchant.id,
                 name="Standard Negotiation Policy",
@@ -424,6 +472,7 @@ def seed_db(reset: bool = False, db_session: Optional[Session] = None) -> dict:
                 is_active=True
             )
             db.add(neg_policy)
+            db.flush()
 
         db.commit()
         stats["total_products"] = db.query(Product).filter(Product.is_active == True).count()

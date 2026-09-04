@@ -210,6 +210,11 @@ export default function ShoppingPage() {
         review_count?: number;
         lowest_market_price?: number | null;
         external_stores_count?: number;
+        variants_count?: number;
+        available_colors?: string[];
+        available_sizes?: string[];
+        min_price?: number | string;
+        max_price?: number | string;
       }) => ({
         id: item.id,
         name: item.name,
@@ -225,6 +230,11 @@ export default function ShoppingPage() {
         review_count: item.review_count ?? 50,
         lowest_market_price: item.lowest_market_price,
         external_stores_count: item.external_stores_count ?? 0,
+        variants_count: item.variants_count ?? 1,
+        available_colors: item.available_colors || [],
+        available_sizes: item.available_sizes || [],
+        min_price: item.min_price ? Number(item.min_price) : undefined,
+        max_price: item.max_price ? Number(item.max_price) : undefined,
       }));
       setCatalogProducts(formatted);
       setFilteredProducts(formatted);

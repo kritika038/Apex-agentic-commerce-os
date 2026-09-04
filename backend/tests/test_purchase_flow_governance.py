@@ -549,6 +549,9 @@ def test_scenario_f_exact_5000_threshold_not_approval_required(db_session):
         db_session.flush()
         db_session.add(Inventory(merchant_id=merchant.id, product_id=p5k.id, stock_quantity=10, reserved_quantity=0))
         db_session.commit()
+    else:
+        p5k.is_active = True
+        db_session.commit()
 
     intent = PurchaseIntent(
         merchant_id=merchant.id,
@@ -593,6 +596,9 @@ def test_scenario_g_5001_triggers_approval_required(db_session):
         db_session.add(p5001)
         db_session.flush()
         db_session.add(Inventory(merchant_id=merchant.id, product_id=p5001.id, stock_quantity=10, reserved_quantity=0))
+        db_session.commit()
+    else:
+        p5001.is_active = True
         db_session.commit()
 
     intent = PurchaseIntent(

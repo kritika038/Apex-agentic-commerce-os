@@ -25,6 +25,11 @@ export interface Product {
   external_stores_count?: number;
   why_this_rationale?: string[];
   ranking_score?: number;
+  variants_count?: number;
+  available_colors?: string[];
+  available_sizes?: string[];
+  min_price?: number;
+  max_price?: number;
 }
 
 export interface ProductCardProps {
@@ -41,6 +46,8 @@ export function ProductCard({ product, onAddToCart, onOpenPriceCheck, isAdding =
     product.mrp && product.mrp > product.price
       ? Math.round(((product.mrp - product.price) / product.mrp) * 100)
       : null;
+
+  const hasMultipleVariants = (product.variants_count ?? 1) > 1 || (product.available_colors?.length ?? 0) > 1;
 
   return (
     <div className="group bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col justify-between hover:shadow-md hover:border-slate-300 transition-all duration-200">
@@ -69,10 +76,17 @@ export function ProductCard({ product, onAddToCart, onOpenPriceCheck, isAdding =
           )}
         </div>
 
-        <div className="absolute top-2.5 right-2.5">
+        <div className="absolute top-2.5 right-2.5 flex flex-col items-end gap-1">
           <Badge variant={isOutOfStock ? 'error' : 'success'} size="xs" dot={!isOutOfStock}>
             {isOutOfStock ? 'Out of Stock' : `${product.stock_quantity ?? 10} in stock`}
           </Badge>
+          {hasMultipleVariants && (
+            <span className="px-2 py-0.5 rounded-md bg-indigo-600/90 text-white text-[9px] font-bold shadow-2xs">
+              {product.available_colors && product.available_colors.length > 1
+                ? `${product.available_colors.length} Colors`
+                : `${product.variants_count} Variants`}
+            </span>
+          )}
         </div>
       </Link>
 

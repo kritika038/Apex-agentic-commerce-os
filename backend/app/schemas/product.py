@@ -46,5 +46,11 @@ class ProductResponse(ProductBase):
     image_url: Optional[str] = None
     lowest_market_price: Optional[float] = None
     external_stores_count: Optional[int] = 0
+    variants_count: Optional[int] = 1
+    available_colors: Optional[list] = []
+    available_sizes: Optional[list] = []
+    min_price: Optional[Decimal] = None
+    max_price: Optional[Decimal] = None
+    variants: Optional[list] = []
 
     model_config = ConfigDict(from_attributes=True)

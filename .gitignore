@@ -26,6 +26,7 @@ backend/venv/
 vto_venv/
 backend/vto_venv/
 backend/fashn-vton-1.5/
+hf_space/
 .venv/
 env/
 

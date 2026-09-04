@@ -508,59 +508,81 @@ export default function ProductDetailPage() {
                   </div>
                 </div>
 
-                {/* Variant Selectors for Wearable/Try-On Products */}
-                {isVTOSupported && (
-                  <div className="space-y-3 pt-3 border-t border-slate-100">
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="font-bold text-slate-700 uppercase tracking-wider">Color:</span>
-                        <span className="text-indigo-600 font-semibold">{selectedColor}</span>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        {['Classic Black', 'Navy Blue', 'Pure White', 'Crimson Red'].map((c) => (
-                          <button
-                            key={c}
-                            type="button"
-                            onClick={() => setSelectedColor(c)}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
-                              selectedColor === c
-                                ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
-                                : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
-                            }`}
-                          >
-                            {c}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
+                {/* Dynamic Variant Selectors for Colors and Sizes */}
+                {(() => {
+                  const attrs = (product?.attributes as Record<string, unknown>) || {};
+                  const availColors: string[] =
+                    (product as unknown as { available_colors?: string[] })?.available_colors ||
+                    (attrs.available_colors as string[]) ||
+                    (attrs.variant_details ? Object.keys(attrs.variant_details as object) : []) ||
+                    (attrs.variant_images ? Object.keys(attrs.variant_images as object) : []) ||
+                    (attrs.color ? [String(attrs.color)] : []);
 
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="font-bold text-slate-700 uppercase tracking-wider">Size:</span>
-                        <span className="text-indigo-600 font-semibold">{selectedSize}</span>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        {['UK 7 / Small', 'UK 8 / Medium', 'UK 9 / Large', 'UK 10 / XL'].map((s) => {
-                          const label = s.includes('/') ? s.split('/')[1].trim() : s;
-                          return (
-                            <button
-                              key={s}
-                              type="button"
-                              onClick={() => setSelectedSize(label)}
-                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
-                                selectedSize === label
-                                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
-                                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
-                              }`}
-                            >
-                              {s}
-                            </button>
-                          );
-                        })}
-                      </div>
+                  const availSizes: string[] =
+                    (product as unknown as { available_sizes?: string[] })?.available_sizes ||
+                    (attrs.available_sizes as string[]) ||
+                    (attrs.size ? [String(attrs.size)] : []);
+
+                  const hasVariants = availColors.length > 0 || availSizes.length > 0;
+                  if (!hasVariants) return null;
+
+                  return (
+                    <div className="space-y-3 pt-3 border-t border-slate-100">
+                      {availColors.length > 0 && (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-bold text-slate-700 uppercase tracking-wider">Color:</span>
+                            <span className="text-indigo-600 font-semibold">{selectedColor}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {availColors.map((c) => (
+                              <button
+                                key={c}
+                                type="button"
+                                onClick={() => setSelectedColor(c)}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
+                                  selectedColor === c
+                                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                                }`}
+                              >
+                                {c}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {availSizes.length > 0 && (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-bold text-slate-700 uppercase tracking-wider">Size:</span>
+                            <span className="text-indigo-600 font-semibold">{selectedSize}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {availSizes.map((s) => {
+                              const label = s.includes('/') ? s.split('/')[1].trim() : s;
+                              return (
+                                <button
+                                  key={s}
+                                  type="button"
+                                  onClick={() => setSelectedSize(label)}
+                                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
+                                    selectedSize === label
+                                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                                      : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                                  }`}
+                                >
+                                  {s}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {/* Purchase Actions */}
                 <div className="space-y-4 pt-4 border-t border-slate-100">

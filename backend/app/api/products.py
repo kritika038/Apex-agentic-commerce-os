@@ -24,6 +24,34 @@ def _enrich_product(p: Product) -> ProductResponse:
         if prices:
             lowest_market = min(prices)
 
+    attrs = p.attributes if isinstance(p.attributes, dict) else {}
+    variants = attrs.get("variants", [])
+    available_colors = attrs.get("available_colors", [])
+    available_sizes = attrs.get("available_sizes", [])
+    
+    # Derive colors/sizes from variant_details or variant_images if not explicitly in attributes
+    if not available_colors:
+        if "variant_details" in attrs and isinstance(attrs["variant_details"], dict):
+            available_colors = list(attrs["variant_details"].keys())
+        elif "variant_images" in attrs and isinstance(attrs["variant_images"], dict):
+            available_colors = list(attrs["variant_images"].keys())
+        elif "color" in attrs and attrs["color"]:
+            available_colors = [str(attrs["color"])]
+
+    if not available_sizes and "size" in attrs and attrs["size"]:
+        available_sizes = [str(attrs["size"])]
+
+    # Compute min and max price across variants
+    min_p = p.price
+    max_p = p.price
+    if variants and isinstance(variants, list):
+        v_prices = [Decimal(str(v["price"])) for v in variants if "price" in v and v["price"] is not None]
+        if v_prices:
+            min_p = min(v_prices)
+            max_p = max(v_prices)
+
+    variants_cnt = max(1, len(variants)) if variants else (len(available_colors) if len(available_colors) > 1 else 1)
+
     return ProductResponse(
         id=str(p.id),
         merchant_id=str(p.merchant_id),
@@ -41,14 +69,20 @@ def _enrich_product(p: Product) -> ProductResponse:
         rating=float(p.rating) if p.rating else 4.5,
         review_count=p.review_count or 0,
         tags=p.tags or [],
-        attributes=p.attributes or {},
+        attributes=attrs,
         is_active=p.is_active,
         stock_quantity=stock,
         in_stock=stock > 0,
         image_url=img,
         lowest_market_price=lowest_market,
         external_stores_count=ext_count,
-        external_comparison_enabled=p.external_comparison_enabled
+        external_comparison_enabled=p.external_comparison_enabled,
+        variants_count=variants_cnt,
+        available_colors=available_colors,
+        available_sizes=available_sizes,
+        min_price=min_p,
+        max_price=max_p,
+        variants=variants
     )
 
 @router.get("", response_model=List[ProductResponse])
@@ -134,9 +168,25 @@ def read_products(
     else:
         q = q.order_by(Product.created_at.asc())
 
-    products = q.offset(skip).limit(limit).all()
+    raw_products = q.all()
 
-    enriched = [_enrich_product(p) for p in products]
+    # Storefront Canonical Product Family Deduplication:
+    # Exactly one card per physical canonical product family
+    seen_families = set()
+    deduped_products: List[Product] = []
+
+    for p in raw_products:
+        family_key = (
+            p.variant_group_id
+            or (f"{p.brand.lower().strip()}:{p.model_number.lower().strip()}" if p.brand and p.model_number else None)
+            or p.name.lower().strip()
+        )
+        if family_key not in seen_families:
+            seen_families.add(family_key)
+            deduped_products.append(p)
+
+    paginated = deduped_products[skip : skip + limit]
+    enriched = [_enrich_product(p) for p in paginated]
     if in_stock_only:
         enriched = [p for p in enriched if p.in_stock]
     return enriched

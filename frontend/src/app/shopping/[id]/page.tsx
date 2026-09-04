@@ -1,9 +1,10 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { apiClient, extractErrorMessage } from '@/lib/api';
+import { loadRazorpayScript, RazorpayCheckoutOptions } from '@/lib/razorpay';
 import { StorefrontHeader } from '@/components/storefront/StorefrontHeader';
 import { AIShoppingDrawer, AIMessage } from '@/components/storefront/AIShoppingDrawer';
 import { CartDrawer, CartData } from '@/components/storefront/CartDrawer';
@@ -19,6 +20,7 @@ import {
   PlusIcon,
   MinusIcon,
   StarIcon,
+  ClockIcon,
 } from '@/components/ui/Icons';
 import { PriceComparisonCard } from '@/components/comparison/PriceComparisonCard';
 import { PriceComparisonModal } from '@/components/comparison/PriceComparisonModal';
@@ -56,6 +58,60 @@ interface ProductDetail {
   attributes?: Record<string, unknown>;
 }
 
+export interface ValidatedNegotiatedOffer {
+  offer_id: string;
+  offer_code: string;
+  product_id: string;
+  product_name: string;
+  product_image_url?: string;
+  quantity: number;
+  list_price: number;
+  list_total: number;
+  requested_total: number;
+  offered_unit_price: number;
+  final_total: number;
+  discount_amount: number;
+  discount_percent: number;
+  currency: string;
+  status: string;
+  reason?: string;
+  expires_at: string;
+  seconds_remaining: number;
+  is_expired: boolean;
+  is_payable: boolean;
+  is_counter: boolean;
+  is_approved: boolean;
+  is_accepted: boolean;
+  is_pending: boolean;
+  is_declined: boolean;
+  is_confirmed: boolean;
+  in_stock: boolean;
+  stock_quantity: number;
+}
+
+interface CheckoutNegotiationResponse {
+  offer_id: string;
+  negotiation_id: string;
+  razorpay_order_id: string;
+  amount: number;
+  amount_paise: number;
+  currency: string;
+  key_id?: string;
+  razorpay_key_id?: string;
+  status: string;
+}
+
+function formatCountdown(totalSecs: number) {
+  if (totalSecs <= 0) return '0m 0s';
+  const hours = Math.floor(totalSecs / 3600);
+  const minutes = Math.floor((totalSecs % 3600) / 60);
+  const seconds = totalSecs % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+  return `${minutes}m ${seconds}s`;
+}
+
 interface SmartBundle {
   target_product_id: string;
   target_product_name: string;
@@ -87,7 +143,9 @@ interface ReviewSummary {
 export default function ProductDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const productId = params?.id as string;
+  const negotiatedOfferId = searchParams?.get('negotiated_offer_id') || null;
 
   const [product, setProduct] = useState<ProductDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -100,6 +158,11 @@ export default function ProductDetailPage() {
   const [selectedColor, setSelectedColor] = useState<string>('Classic Black');
   const [selectedSize, setSelectedSize] = useState<string>('Medium');
   const [isNegotiationOpen, setIsNegotiationOpen] = useState(false);
+
+  // Negotiated Offer Context state
+  const [validatedOffer, setValidatedOffer] = useState<ValidatedNegotiatedOffer | null>(null);
+  const [isPayingNegotiated, setIsPayingNegotiated] = useState(false);
+  const [secondsRemaining, setSecondsRemaining] = useState<number>(0);
 
   // Intelligence state
   const [bundles, setBundles] = useState<SmartBundle[]>([]);
@@ -213,6 +276,181 @@ export default function ProductDetailPage() {
   useEffect(() => {
     fetchProduct();
   }, [fetchProduct]);
+
+  // 2b. Fetch and validate Negotiated Offer context for PDP
+  useEffect(() => {
+    if (!productId || !negotiatedOfferId) {
+      setValidatedOffer(null);
+      return;
+    }
+    const token = localStorage.getItem('access_token');
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+
+    apiClient
+      .get<ValidatedNegotiatedOffer>(`/negotiation/${negotiatedOfferId}/validate-pdp?product_id=${productId}`, { headers })
+      .then((res) => {
+        setValidatedOffer(res.data);
+        if (res.data.quantity && res.data.quantity > 0) {
+          setQuantity(res.data.quantity);
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to validate negotiated offer for PDP:', err);
+        setValidatedOffer(null);
+      });
+  }, [productId, negotiatedOfferId]);
+
+  // Live countdown timer for active offer
+  useEffect(() => {
+    if (!validatedOffer || validatedOffer.is_expired) return;
+    setSecondsRemaining(validatedOffer.seconds_remaining);
+
+    const interval = setInterval(() => {
+      setSecondsRemaining((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          setValidatedOffer((curr) => (curr ? { ...curr, is_expired: true, is_payable: false } : null));
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [validatedOffer?.offer_id, validatedOffer?.expires_at, validatedOffer?.is_expired, validatedOffer?.seconds_remaining]);
+
+  // 1-Click Razorpay Checkout for Authoritative Negotiated Offer
+  const handleCheckoutNegotiatedOffer = async () => {
+    if (!validatedOffer || !validatedOffer.is_payable) return;
+    setIsPayingNegotiated(true);
+    try {
+      const token = localStorage.getItem('access_token');
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const res = await apiClient.post<CheckoutNegotiationResponse>(
+        `/negotiation/${validatedOffer.offer_id}/checkout`,
+        {
+          customer_id: userProfile?.email || 'cust_default',
+          payment_method: 'upi',
+        },
+        { headers }
+      );
+
+      const checkoutRes = res.data;
+      if (!checkoutRes || !checkoutRes.razorpay_order_id) {
+        throw new Error('Failed to create server payment order.');
+      }
+
+      const isLoaded = await loadRazorpayScript();
+      if (!isLoaded || !window.Razorpay) {
+        showToast('Online payment checkout failed to load. Please try again.', 'error');
+        setIsPayingNegotiated(false);
+        return;
+      }
+
+      const keyId = checkoutRes.razorpay_key_id || checkoutRes.key_id || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID;
+      if (!keyId) {
+        showToast('Payment key not configured on backend.', 'error');
+        setIsPayingNegotiated(false);
+        return;
+      }
+
+      const options: RazorpayCheckoutOptions = {
+        key: keyId,
+        amount: checkoutRes.amount_paise,
+        currency: checkoutRes.currency || 'INR',
+        name: 'Apex Sports',
+        description: `Negotiated Order • ${validatedOffer.offer_code}`,
+        order_id: checkoutRes.razorpay_order_id,
+        handler: async (paymentResponse) => {
+          try {
+            const verifyRes = await apiClient.post('/payments/verify-signature', {
+              razorpay_order_id: paymentResponse.razorpay_order_id || checkoutRes.razorpay_order_id,
+              razorpay_payment_id: paymentResponse.razorpay_payment_id,
+              razorpay_signature: paymentResponse.razorpay_signature,
+            });
+
+            if (verifyRes.data?.status === 'CAPTURED' || verifyRes.data?.status === 'SUCCESS' || verifyRes.data?.order_id) {
+              showToast('🎉 Negotiated payment verified! Your order has been placed.', 'success');
+              setValidatedOffer((prev) =>
+                prev ? { ...prev, is_confirmed: true, is_payable: false, status: 'ORDER_CONFIRMED' } : null
+              );
+              router.push('/orders');
+            } else {
+              showToast('Payment confirmation pending.', 'info');
+            }
+          } catch (err: unknown) {
+            console.error('Signature verification error:', err);
+            showToast(extractErrorMessage(err, 'Payment verification failed.'), 'error');
+          } finally {
+            setIsPayingNegotiated(false);
+          }
+        },
+        prefill: {
+          name: userProfile?.full_name || 'Valued Customer',
+          email: userProfile?.email || 'shopper@apex.local',
+          contact: '9999999999',
+        },
+        theme: {
+          color: '#4f46e5',
+        },
+        modal: {
+          ondismiss: () => {
+            setIsPayingNegotiated(false);
+          },
+        },
+      };
+
+      const rzp = new window.Razorpay(options);
+      rzp.on('payment.failed', (failedRes: { error?: { description?: string } }) => {
+        showToast(`Payment failed: ${failedRes?.error?.description || 'Gateway error'}`, 'error');
+        setIsPayingNegotiated(false);
+      });
+      rzp.open();
+    } catch (err: unknown) {
+      showToast(extractErrorMessage(err, 'Failed to launch checkout.'), 'error');
+      setIsPayingNegotiated(false);
+    }
+  };
+
+  // Accept Counter-Offer & Proceed
+  const handleAcceptCounterOnPDP = async () => {
+    if (!validatedOffer) return;
+    setIsPayingNegotiated(true);
+    try {
+      const token = localStorage.getItem('access_token');
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      await apiClient.post(
+        `/negotiation/${validatedOffer.offer_id}/accept`,
+        { customer_id: userProfile?.email || 'cust_default' },
+        { headers }
+      );
+      showToast('Counter offer accepted! Launching payment checkout...', 'success');
+      await handleCheckoutNegotiatedOffer();
+    } catch (err) {
+      showToast(extractErrorMessage(err, 'Failed to accept counter offer.'), 'error');
+      setIsPayingNegotiated(false);
+    }
+  };
+
+  // Decline Offer from PDP
+  const handleRejectOfferOnPDP = async () => {
+    if (!validatedOffer) return;
+    try {
+      const token = localStorage.getItem('access_token');
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      await apiClient.post(
+        `/negotiation/${validatedOffer.offer_id}/reject`,
+        { customer_id: userProfile?.email || 'cust_default' },
+        { headers }
+      );
+      showToast('Price request declined.', 'info');
+      setValidatedOffer((curr) =>
+        curr ? { ...curr, is_declined: true, is_payable: false, status: 'CUSTOMER_REJECTED' } : null
+      );
+    } catch (err) {
+      showToast(extractErrorMessage(err, 'Failed to decline price request.'), 'error');
+    }
+  };
 
   // 3. Fetch cart
   const fetchCart = useCallback(async (sid: string) => {
@@ -463,7 +701,168 @@ export default function ProductDetailPage() {
                     </h1>
                   </div>
 
-                  {/* Price Display */}
+                  {/* Negotiated Special Offer Banner (Authoritative from Server) */}
+                  {validatedOffer && (
+                    <div
+                      className={`p-4 sm:p-5 rounded-2xl border transition-all ${
+                        validatedOffer.is_payable
+                          ? 'bg-gradient-to-br from-emerald-50/90 via-indigo-50/70 to-slate-50 border-emerald-300 ring-1 ring-emerald-500/20 shadow-xs'
+                          : validatedOffer.is_confirmed
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                          : validatedOffer.is_expired
+                          ? 'bg-amber-50/80 border-amber-200 text-amber-900'
+                          : validatedOffer.is_declined
+                          ? 'bg-rose-50/80 border-rose-200 text-rose-900'
+                          : 'bg-slate-50 border-slate-200 text-slate-800'
+                      }`}
+                    >
+                      {/* Deal Header */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200/60">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base">
+                            {validatedOffer.is_payable
+                              ? '🤝'
+                              : validatedOffer.is_confirmed
+                              ? '🎉'
+                              : validatedOffer.is_expired
+                              ? '⏳'
+                              : 'ℹ️'}
+                          </span>
+                          <span className="text-xs font-extrabold uppercase tracking-wider text-slate-900">
+                            {validatedOffer.is_counter
+                              ? 'Special Merchant Counter-Offer'
+                              : validatedOffer.is_approved
+                              ? 'Approved Negotiated Deal'
+                              : validatedOffer.is_accepted
+                              ? 'Accepted Special Deal'
+                              : validatedOffer.is_confirmed
+                              ? 'Negotiated Deal Completed & Paid'
+                              : validatedOffer.is_expired
+                              ? 'Negotiated Offer Expired'
+                              : validatedOffer.is_declined
+                              ? 'Price Request Declined'
+                              : 'Price Request Under Review'}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-mono font-bold text-slate-600 bg-white px-2 py-0.5 rounded border border-slate-200 shadow-2xs">
+                            {validatedOffer.offer_code}
+                          </span>
+                          {validatedOffer.is_payable && (
+                            <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100/90 px-2 py-0.5 rounded border border-emerald-300">
+                              Save ₹{Number(validatedOffer.discount_amount).toLocaleString('en-IN')} ({Number(validatedOffer.discount_percent).toFixed(1)}% OFF)
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Deal Body */}
+                      <div className="py-3 space-y-2.5">
+                        {validatedOffer.is_payable ? (
+                          <>
+                            <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2">
+                              <div>
+                                <div className="flex items-baseline gap-3">
+                                  <span className="text-3xl font-black text-emerald-700 font-mono">
+                                    ₹{Number(validatedOffer.final_total).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                                  </span>
+                                  <span className="text-base font-mono text-slate-400 line-through">
+                                    ₹{Number(validatedOffer.list_total).toLocaleString('en-IN')}
+                                  </span>
+                                </div>
+                                <p className="text-xs text-slate-600 font-medium mt-0.5">
+                                  Locked price for <strong>{validatedOffer.quantity} unit{validatedOffer.quantity > 1 ? 's' : ''}</strong> (₹{Number(validatedOffer.offered_unit_price).toLocaleString('en-IN')}/unit)
+                                </p>
+                              </div>
+
+                              {secondsRemaining > 0 && (
+                                <div className="flex items-center gap-1.5 text-xs font-bold text-amber-700 bg-amber-100/80 border border-amber-200 px-3 py-1 rounded-xl shrink-0">
+                                  <ClockIcon size={13} />
+                                  <span>Expires in {formatCountdown(secondsRemaining)}</span>
+                                </div>
+                              )}
+                            </div>
+
+                            {validatedOffer.reason && (
+                              <div className="mt-2 text-xs bg-white/80 border border-slate-200 rounded-xl p-2.5 text-slate-700 flex items-start gap-1.5">
+                                <span className="text-indigo-600 font-bold shrink-0">💬 Note:</span>
+                                <span className="italic">{validatedOffer.reason}</span>
+                              </div>
+                            )}
+
+                            {/* 1-Click Pay / Accept Button */}
+                            <div className="pt-2">
+                              <Button
+                                onClick={validatedOffer.is_counter ? handleAcceptCounterOnPDP : handleCheckoutNegotiatedOffer}
+                                isLoading={isPayingNegotiated}
+                                disabled={isPayingNegotiated || !validatedOffer.in_stock}
+                                variant="primary"
+                                size="lg"
+                                className="w-full font-bold shadow-md hover:shadow-lg py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center gap-2 text-sm"
+                                leftIcon={<ShieldCheckIcon size={18} />}
+                              >
+                                {validatedOffer.in_stock
+                                  ? validatedOffer.is_counter
+                                    ? `Accept & Buy Now • ₹${Number(validatedOffer.final_total).toLocaleString('en-IN')}`
+                                    : `⚡ Checkout at Negotiated Price • ₹${Number(validatedOffer.final_total).toLocaleString('en-IN')}`
+                                  : 'Out of Stock for Requested Qty'}
+                              </Button>
+                              <div className="flex items-center justify-between text-[11px] text-slate-500 pt-2 px-1">
+                                <span>🔒 100% Secure Razorpay Settle</span>
+                                <button
+                                  type="button"
+                                  onClick={handleRejectOfferOnPDP}
+                                  className="text-rose-600 hover:underline font-semibold cursor-pointer"
+                                >
+                                  Decline Deal
+                                </button>
+                              </div>
+                            </div>
+                          </>
+                        ) : validatedOffer.is_expired ? (
+                          <div className="text-xs space-y-1">
+                            <p className="font-bold text-amber-800 flex items-center gap-1.5">
+                              <ClockIcon size={13} />
+                              <span>This negotiated offer has expired.</span>
+                            </p>
+                            <p className="text-slate-600">
+                              The special price of ₹{Number(validatedOffer.final_total).toLocaleString('en-IN')} is no longer active. Standard catalog pricing of ₹{Number(product.price).toLocaleString('en-IN')} applies below.
+                            </p>
+                          </div>
+                        ) : validatedOffer.is_declined ? (
+                          <div className="text-xs space-y-1">
+                            <p className="font-bold text-rose-800">
+                              Price request was declined by merchant.
+                            </p>
+                            <p className="text-slate-600">
+                              {validatedOffer.reason || 'You can still purchase this product at the standard store price below.'}
+                            </p>
+                          </div>
+                        ) : validatedOffer.is_confirmed ? (
+                          <div className="text-xs space-y-1">
+                            <p className="font-bold text-emerald-800">
+                              You successfully purchased this product under offer {validatedOffer.offer_code}.
+                            </p>
+                            <Link href="/orders" className="text-indigo-600 hover:underline font-bold inline-block mt-1">
+                              View in My Orders →
+                            </Link>
+                          </div>
+                        ) : (
+                          <div className="text-xs space-y-1">
+                            <p className="font-bold text-amber-800 flex items-center gap-1.5">
+                              <ClockIcon size={13} />
+                              <span>Your price request (₹{Number(validatedOffer.requested_total).toLocaleString('en-IN')}) is under merchant review.</span>
+                            </p>
+                            <p className="text-slate-600">
+                              We will update this deal as soon as the merchant responds.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Standard Catalog Price Display */}
                   <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 flex flex-col sm:flex-row sm:items-baseline justify-between gap-2">
                     <div className="flex items-baseline gap-3">
                       <span className="text-3xl font-black text-slate-900 font-mono">
@@ -476,7 +875,7 @@ export default function ProductDetailPage() {
                       )}
                     </div>
                     <span className="text-xs text-slate-500 font-medium">
-                      (Inclusive of all taxes • Locked Catalog Price)
+                      (Inclusive of all taxes • Standard Catalog Price)
                     </span>
                   </div>
 

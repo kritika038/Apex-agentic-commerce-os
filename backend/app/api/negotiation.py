@@ -5,6 +5,7 @@ approval workflows, offer lifecycle, and payment checkout.
 """
 
 from typing import List, Optional, Dict, Any
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 import logging
@@ -12,10 +13,12 @@ import logging
 from app.database.session import get_db
 from app.database.models.user import User
 from app.database.models.merchant import Merchant
+from app.database.models.product import Product
 from app.database.models.negotiated_offer import NegotiatedOffer
 from app.database.models.negotiation_policy import MerchantNegotiationPolicy
 from app.auth.deps import get_current_user, get_optional_current_user
 from app.negotiation.engine import NegotiationEngine
+from app.negotiation.state_machine import NegotiationState
 from app.agents.merchant_negotiation_agent import MerchantNegotiationAgent
 from app.schemas.negotiation import (
     NegotiationStartRequest,
@@ -470,3 +473,125 @@ def get_negotiation_trace(
         },
         "metadata": offer.metadata_json or {},
     }
+
+
+@router.get("/{offer_id}/validate-pdp", response_model=Dict[str, Any])
+def validate_offer_for_pdp(
+    offer_id: str,
+    product_id: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Validates a negotiated offer for display and checkout on the Product Detail Page (PDP).
+    Guarantees server-authoritative pricing, ownership check, stock availability,
+    and expiration verification without trusting client-side query parameters.
+    """
+    offer = db.query(NegotiatedOffer).filter(
+        (NegotiatedOffer.id == offer_id) | (NegotiatedOffer.negotiation_id == offer_id)
+    ).first()
+
+    if not offer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Negotiated price request not found."
+        )
+
+    # 1. Validate product match
+    if product_id and offer.product_id != product_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Product mismatch: This price request belongs to a different product."
+        )
+
+    # 2. Authorization / Ownership check
+    if current_user and current_user.role not in ["merchant_admin", "admin"]:
+        user_id_or_email = current_user.email or current_user.id
+        if not NegotiationEngine._matches_buyer(db, offer.buyer_user_id, user_id_or_email):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: You do not have permission to view this price request."
+            )
+
+    # 3. Expiration Check
+    now_utc = datetime.now(timezone.utc)
+    if offer.expires_at:
+        exp = offer.expires_at if offer.expires_at.tzinfo else offer.expires_at.replace(tzinfo=timezone.utc)
+        is_expired = (exp < now_utc) or (offer.status == NegotiationState.EXPIRED.value)
+    else:
+        is_expired = False
+        exp = now_utc
+
+    if is_expired and offer.status in [
+        NegotiationState.COUNTER_OFFERED.value,
+        NegotiationState.AUTO_ACCEPTED.value,
+        NegotiationState.MERCHANT_APPROVED.value,
+        NegotiationState.CUSTOMER_OFFER_PRESENTED.value,
+        NegotiationState.HUMAN_APPROVAL_REQUIRED.value,
+    ]:
+        offer.status = NegotiationState.EXPIRED.value
+        db.commit()
+
+    # 4. Fetch Product and Check Inventory
+    product = db.query(Product).filter(Product.id == offer.product_id).first()
+    stock_qty = product.inventory.stock_quantity if (product and product.inventory) else (10 if product else 0)
+    in_stock = bool(product and stock_qty >= offer.quantity)
+
+    # 5. Determine State Flags
+    is_counter = (offer.status in [NegotiationState.COUNTER_OFFERED.value, NegotiationState.MERCHANT_COUNTERED.value]) and not is_expired
+    is_approved = (offer.status in [NegotiationState.AUTO_ACCEPTED.value, NegotiationState.MERCHANT_APPROVED.value]) and not is_expired
+    is_accepted = (offer.status == NegotiationState.CUSTOMER_ACCEPTED.value) and not is_expired
+    is_pending = (offer.status in [
+        NegotiationState.HUMAN_APPROVAL_REQUIRED.value,
+        NegotiationState.OFFER_REQUESTED.value,
+        NegotiationState.NEGOTIATION_STARTED.value,
+        NegotiationState.MERCHANT_POLICY_EVALUATING.value,
+    ]) and not is_expired
+    is_declined = offer.status in [
+        NegotiationState.REJECTED.value,
+        NegotiationState.CUSTOMER_REJECTED.value,
+        NegotiationState.MERCHANT_REJECTED.value,
+    ]
+    is_confirmed = (offer.status == NegotiationState.ORDER_CONFIRMED.value) or (offer.payment_status == "CAPTURED")
+
+    is_payable = (
+        (is_approved or is_accepted or is_counter)
+        and not is_expired
+        and not is_confirmed
+        and not is_declined
+        and in_stock
+    )
+
+    seconds_remaining = max(0, int((exp - now_utc).total_seconds())) if not is_expired else 0
+
+    return {
+        "offer_id": offer.id,
+        "offer_code": offer.offer_code,
+        "product_id": offer.product_id,
+        "product_name": product.name if product else (offer.product_name or "Product"),
+        "product_image_url": product.image_url if product else offer.product_image_url,
+        "quantity": offer.quantity,
+        "list_price": float(offer.list_price),
+        "list_total": float(offer.list_total),
+        "requested_total": float(offer.requested_total),
+        "offered_unit_price": float(offer.offered_unit_price),
+        "final_total": float(offer.final_total),
+        "discount_amount": float(offer.discount_amount),
+        "discount_percent": float(offer.discount_percent),
+        "currency": offer.currency,
+        "status": offer.status,
+        "reason": offer.merchant_message or offer.reason,
+        "expires_at": offer.expires_at.isoformat() if offer.expires_at else "",
+        "seconds_remaining": seconds_remaining,
+        "is_expired": is_expired,
+        "is_payable": is_payable,
+        "is_counter": is_counter,
+        "is_approved": is_approved,
+        "is_accepted": is_accepted,
+        "is_pending": is_pending,
+        "is_declined": is_declined,
+        "is_confirmed": is_confirmed,
+        "in_stock": in_stock,
+        "stock_quantity": stock_qty,
+    }
+

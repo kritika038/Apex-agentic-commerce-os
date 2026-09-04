@@ -455,3 +455,210 @@ def test_o_approver_user_not_found_raises_clean_error(db: Session):
             admin_user_id="non_existent_user_12345",
             reason="Should fail cleanly"
         )
+
+
+def test_p_pdp_validation_active_counter_offer(client, db: Session):
+    """Test P: Validates that /validate-pdp endpoint returns authoritative counter-offer pricing and payable state."""
+    merchant = db.query(Merchant).filter(Merchant.name == "Apex Sports Merchant").first()
+    product = db.query(Product).filter(Product.merchant_id == merchant.id, Product.is_active == True).first()
+
+    # Request 10% discount -> triggers counter-offer at 5% max
+    list_price = Decimal(str(product.price))
+    requested_total = (list_price * Decimal("0.90")).quantize(Decimal("0.01"))
+
+    offer, result = NegotiationEngine.evaluate_negotiation(
+        db=db,
+        merchant=merchant,
+        product=product,
+        quantity=1,
+        requested_total=requested_total,
+        buyer_user_id="customer@demo-sports.test",
+        trace_id="trc_test_p_001"
+    )
+    assert offer.status == NegotiationState.COUNTER_OFFERED.value
+
+    # Call validate-pdp
+    resp = client.get(f"/api/v1/negotiation/{offer.id}/validate-pdp?product_id={product.id}")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["offer_id"] == offer.id
+    assert data["product_id"] == product.id
+    assert data["is_payable"] is True
+    assert data["is_counter"] is True
+    assert data["is_expired"] is False
+    assert data["final_total"] == float(offer.final_total)
+    assert data["discount_percent"] == float(offer.discount_percent)
+    assert data["seconds_remaining"] > 0
+
+
+def test_q_pdp_validation_product_mismatch_returns_400(client, db: Session):
+    """Test Q: Calling /validate-pdp with a mismatched product_id returns 400 Bad Request."""
+    merchant = db.query(Merchant).filter(Merchant.name == "Apex Sports Merchant").first()
+    product = db.query(Product).filter(Product.merchant_id == merchant.id, Product.is_active == True).first()
+
+    offer, _ = NegotiationEngine.evaluate_negotiation(
+        db=db,
+        merchant=merchant,
+        product=product,
+        quantity=1,
+        requested_total=Decimal(str(product.price * Decimal("0.98"))).quantize(Decimal("0.01")),
+        buyer_user_id="customer@demo-sports.test",
+        trace_id="trc_test_q_001"
+    )
+
+    resp = client.get(f"/api/v1/negotiation/{offer.id}/validate-pdp?product_id=prod_completely_wrong_id")
+    assert resp.status_code == 400
+    assert "different product" in resp.json()["detail"].lower() or "mismatch" in resp.json()["detail"].lower()
+
+
+def test_r_pdp_validation_unauthorized_customer_returns_403(client, db: Session):
+    """Test R: Authenticated user who does not own the offer is blocked with 403 Forbidden."""
+    from app.core.security import create_access_token
+
+    merchant = db.query(Merchant).filter(Merchant.name == "Apex Sports Merchant").first()
+    product = db.query(Product).filter(Product.merchant_id == merchant.id, Product.is_active == True).first()
+
+    # Offer belongs to customer@demo-sports.test
+    offer, _ = NegotiationEngine.evaluate_negotiation(
+        db=db,
+        merchant=merchant,
+        product=product,
+        quantity=1,
+        requested_total=Decimal(str(product.price * Decimal("0.98"))).quantize(Decimal("0.01")),
+        buyer_user_id="customer@demo-sports.test",
+        trace_id="trc_test_r_001"
+    )
+
+    # Intruder user
+    intruder = User(
+        email="intruder@other.test",
+        full_name="Intruder User",
+        hashed_password="hash",
+        role="customer",
+        is_active=True
+    )
+    db.add(intruder)
+    db.commit()
+    db.refresh(intruder)
+
+    token = create_access_token(subject=intruder.id, merchant_id=None, role=intruder.role)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    resp = client.get(f"/api/v1/negotiation/{offer.id}/validate-pdp?product_id={product.id}", headers=headers)
+    assert resp.status_code == 403
+    assert "access denied" in resp.json()["detail"].lower() or "permission" in resp.json()["detail"].lower()
+
+
+def test_s_pdp_validation_expired_offer_marked_not_payable(client, db: Session):
+    """Test S: Expired offer returns is_expired=True and is_payable=False."""
+    merchant = db.query(Merchant).filter(Merchant.name == "Apex Sports Merchant").first()
+    product = db.query(Product).filter(Product.merchant_id == merchant.id, Product.is_active == True).first()
+
+    past_time = datetime.now(timezone.utc) - timedelta(hours=2)
+    offer = NegotiatedOffer(
+        tenant_id=merchant.id,
+        negotiation_id="neg_expired_test_s",
+        buyer_user_id="customer@demo-sports.test",
+        merchant_id=merchant.id,
+        product_id=product.id,
+        quantity=1,
+        list_price=Decimal(str(product.price)),
+        list_total=Decimal(str(product.price)),
+        requested_total=Decimal(str(product.price * Decimal("0.98"))).quantize(Decimal("0.01")),
+        final_total=Decimal(str(product.price * Decimal("0.98"))).quantize(Decimal("0.01")),
+        discount_amount=Decimal(str(product.price * Decimal("0.02"))).quantize(Decimal("0.01")),
+        discount_percent=Decimal("2.00"),
+        currency="INR",
+        status=NegotiationState.AUTO_ACCEPTED.value,
+        expires_at=past_time,
+        trace_id="trc_expired_test_s"
+    )
+    db.add(offer)
+    db.commit()
+    db.refresh(offer)
+
+    resp = client.get(f"/api/v1/negotiation/{offer.id}/validate-pdp?product_id={product.id}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["is_expired"] is True
+    assert data["is_payable"] is False
+    assert data["seconds_remaining"] == 0
+
+
+def test_t_pdp_validation_declined_offer_not_payable(client, db: Session):
+    """Test T: Declined offer returns is_declined=True and is_payable=False."""
+    merchant = db.query(Merchant).filter(Merchant.name == "Apex Sports Merchant").first()
+    product = db.query(Product).filter(Product.merchant_id == merchant.id, Product.is_active == True).first()
+
+    offer = NegotiatedOffer(
+        tenant_id=merchant.id,
+        negotiation_id="neg_declined_test_t",
+        buyer_user_id="customer@demo-sports.test",
+        merchant_id=merchant.id,
+        product_id=product.id,
+        quantity=1,
+        list_price=Decimal(str(product.price)),
+        list_total=Decimal(str(product.price)),
+        requested_total=Decimal(str(product.price * Decimal("0.50"))).quantize(Decimal("0.01")),
+        final_total=Decimal(str(product.price)),
+        discount_amount=Decimal("0.00"),
+        discount_percent=Decimal("0.00"),
+        currency="INR",
+        status=NegotiationState.CUSTOMER_REJECTED.value,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        trace_id="trc_declined_test_t"
+    )
+    db.add(offer)
+    db.commit()
+    db.refresh(offer)
+
+    resp = client.get(f"/api/v1/negotiation/{offer.id}/validate-pdp?product_id={product.id}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["is_declined"] is True
+    assert data["is_payable"] is False
+
+
+def test_u_pdp_direct_counter_checkout_success(client, db: Session):
+    """Test U: Customer accepting counter-offer on PDP transitions offer to accepted and creates locked payment order."""
+    merchant = db.query(Merchant).filter(Merchant.name == "Apex Sports Merchant").first()
+    product = db.query(Product).filter(Product.merchant_id == merchant.id, Product.is_active == True).first()
+
+    # Request 10% discount -> generates 5% counter-offer
+    list_price = Decimal(str(product.price))
+    requested_total = (list_price * Decimal("0.90")).quantize(Decimal("0.01"))
+
+    offer, _ = NegotiationEngine.evaluate_negotiation(
+        db=db,
+        merchant=merchant,
+        product=product,
+        quantity=1,
+        requested_total=requested_total,
+        buyer_user_id="customer@demo-sports.test",
+        trace_id="trc_test_u_001"
+    )
+    assert offer.status == NegotiationState.COUNTER_OFFERED.value
+
+    # Accept counter offer
+    accept_resp = client.post(
+        f"/api/v1/negotiation/{offer.id}/accept",
+        json={"customer_id": "customer@demo-sports.test"}
+    )
+    assert accept_resp.status_code == 200
+
+    # Checkout
+    resp = client.post(
+        f"/api/v1/negotiation/{offer.id}/checkout",
+        json={"customer_id": "customer@demo-sports.test", "payment_method": "upi"}
+    )
+    assert resp.status_code == 200
+    chk_data = resp.json()
+    assert "razorpay_order_id" in chk_data
+    assert chk_data["amount"] == float(offer.final_total)
+
+    # Verify offer status transitioned to CUSTOMER_ACCEPTED or PAYMENT_PENDING
+    db.expire_all()
+    updated_offer = db.query(NegotiatedOffer).filter(NegotiatedOffer.id == offer.id).first()
+    assert updated_offer.status in [NegotiationState.CUSTOMER_ACCEPTED.value, NegotiationState.PAYMENT_PENDING.value]
+

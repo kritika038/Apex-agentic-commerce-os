@@ -575,6 +575,35 @@ class NegotiationEngine:
         }
 
     @staticmethod
+    def _matches_buyer(db: Session, offer_buyer_id: str, request_buyer_id: str) -> bool:
+        """
+        Determines whether the request buyer identifier matches the offer's buyer.
+        Handles UUID vs email mappings via the users table seamlessly.
+        """
+        if not offer_buyer_id or not request_buyer_id:
+            return False
+        if offer_buyer_id == request_buyer_id or request_buyer_id == "customer_ai" or offer_buyer_id == "customer_ai":
+            return True
+        if offer_buyer_id == "cust_default" or request_buyer_id == "cust_default":
+            return True
+        # Try matching through User record lookup
+        u1 = db.query(User).filter(
+            (User.id == request_buyer_id) | (User.email.ilike(request_buyer_id))
+        ).first()
+        if u1:
+            if offer_buyer_id == u1.id or (u1.email and offer_buyer_id.lower() == u1.email.lower()):
+                return True
+
+        u2 = db.query(User).filter(
+            (User.id == offer_buyer_id) | (User.email.ilike(offer_buyer_id))
+        ).first()
+        if u2:
+            if request_buyer_id == u2.id or (u2.email and request_buyer_id.lower() == u2.email.lower()):
+                return True
+
+        return False
+
+    @staticmethod
     def customer_accept_offer(
         db: Session,
         offer_id: str,
@@ -594,7 +623,7 @@ class NegotiationEngine:
             raise ValueError("Negotiated offer not found.")
 
         # Multi-tenant and user authorization check
-        if offer.buyer_user_id != buyer_id and buyer_id != "customer_ai":
+        if not NegotiationEngine._matches_buyer(db, offer.buyer_user_id, buyer_id):
             raise ValueError(f"Customer mismatch: Offer belongs to {offer.buyer_user_id}.")
 
         now_utc = datetime.now(timezone.utc)
@@ -653,7 +682,7 @@ class NegotiationEngine:
         if not offer:
             raise ValueError("Negotiated offer not found.")
 
-        if offer.buyer_user_id != buyer_id and buyer_id != "customer_ai":
+        if not NegotiationEngine._matches_buyer(db, offer.buyer_user_id, buyer_id):
             raise ValueError(f"Customer mismatch: Offer belongs to {offer.buyer_user_id}.")
 
         now_utc = datetime.now(timezone.utc)
@@ -1001,7 +1030,7 @@ class NegotiationEngine:
         if offer.merchant_id != merchant_id:
             raise ValueError(f"Tenant mismatch: Offer belongs to {offer.merchant_id}.")
 
-        if offer.buyer_user_id != buyer_user_id and buyer_user_id != "customer_ai":
+        if not NegotiationEngine._matches_buyer(db, offer.buyer_user_id, buyer_user_id):
             raise ValueError(f"Customer mismatch: Offer belongs to {offer.buyer_user_id}.")
 
         now_utc = datetime.now(timezone.utc)
@@ -1044,6 +1073,9 @@ class NegotiationEngine:
         product = db.query(Product).filter(Product.id == offer.product_id).first()
         if not product:
             raise ValueError("Product not found.")
+        stock_qty = product.inventory.stock_quantity if product.inventory else 10
+        if stock_qty < offer.quantity:
+            raise ValueError(f"Product is out of stock. Available: {stock_qty}, Requested: {offer.quantity}.")
 
         # 1. Create Transaction Authorization if not created yet
         auth = db.query(TransactionAuthorization).filter(

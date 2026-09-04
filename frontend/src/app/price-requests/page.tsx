@@ -888,7 +888,11 @@ function PriceRequestCard({
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
         {/* Left Section: Image + Product Info */}
         <div className="flex items-start gap-4">
-          <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-xl overflow-hidden bg-slate-100 border border-slate-200/80 shrink-0">
+          <Link
+            href={`/shopping/${offer.product_id}?negotiated_offer_id=${offer.id}`}
+            className="w-20 h-20 sm:w-24 sm:h-24 rounded-xl overflow-hidden bg-slate-100 border border-slate-200/80 shrink-0 hover:opacity-90 transition-opacity block"
+            title="View Product Details"
+          >
             <ProductImage
               src={offer.product_image_url}
               alt={offer.product_name || 'Product'}
@@ -896,7 +900,7 @@ function PriceRequestCard({
               productName={offer.product_name}
               className="w-full h-full object-cover"
             />
-          </div>
+          </Link>
 
           <div className="space-y-1.5 flex-1 min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -911,9 +915,14 @@ function PriceRequestCard({
               )}
             </div>
 
-            <h3 className="text-sm sm:text-base font-bold text-slate-900 line-clamp-1">
-              {offer.product_name || `Product #${offer.product_id.substring(0, 8)}`}
-            </h3>
+            <Link
+              href={`/shopping/${offer.product_id}?negotiated_offer_id=${offer.id}`}
+              className="block group"
+            >
+              <h3 className="text-sm sm:text-base font-bold text-slate-900 line-clamp-1 group-hover:text-indigo-600 transition-colors">
+                {offer.product_name || `Product #${offer.product_id.substring(0, 8)}`}
+              </h3>
+            </Link>
 
             <div className="text-xs text-slate-500 flex flex-wrap items-center gap-x-4 gap-y-1">
               <span>Qty: <strong className="text-slate-800">{offer.quantity} unit{offer.quantity > 1 ? 's' : ''}</strong></span>
@@ -996,6 +1005,12 @@ function PriceRequestCard({
                 >
                   {isProcessing ? 'Accepting...' : 'ACCEPT COUNTER OFFER'}
                 </Button>
+                <Link
+                  href={`/shopping/${offer.product_id}?negotiated_offer_id=${offer.id}`}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold transition-colors border border-indigo-200"
+                >
+                  <span>Shop Product</span>
+                </Link>
                 <Button
                   variant="outline"
                   size="sm"
@@ -1021,6 +1036,12 @@ function PriceRequestCard({
                 >
                   {isPaying ? 'Launching Payment...' : `PROCEED TO CHECKOUT • ₹${Number(offer.final_total).toLocaleString('en-IN')}`}
                 </Button>
+                <Link
+                  href={`/shopping/${offer.product_id}?negotiated_offer_id=${offer.id}`}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors"
+                >
+                  <span>Shop Product</span>
+                </Link>
                 <Button
                   variant="outline"
                   size="sm"
@@ -1035,26 +1056,42 @@ function PriceRequestCard({
 
             {/* 3. Confirmed & Paid */}
             {isConfirmed && (
-              <Link
-                href="/orders"
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-indigo-600 text-white text-xs font-bold transition-colors shadow-xs"
-              >
-                <span>View Order →</span>
-              </Link>
+              <>
+                <Link
+                  href="/orders"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-indigo-600 text-white text-xs font-bold transition-colors shadow-xs"
+                >
+                  <span>View Order →</span>
+                </Link>
+                <Link
+                  href={`/shopping/${offer.product_id}?negotiated_offer_id=${offer.id}`}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors"
+                >
+                  <span>Shop Product</span>
+                </Link>
+              </>
             )}
 
             {/* 4. In Review */}
             {(offer.status === 'HUMAN_APPROVAL_REQUIRED' || offer.status === 'WAITING_FOR_MERCHANT' || offer.status === 'PENDING') && (
-              <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-xl font-semibold flex items-center gap-1.5">
-                <ClockIcon size={12} />
-                <span>Waiting for merchant review</span>
-              </div>
+              <>
+                <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-xl font-semibold flex items-center gap-1.5">
+                  <ClockIcon size={12} />
+                  <span>Waiting for merchant review</span>
+                </div>
+                <Link
+                  href={`/shopping/${offer.product_id}?negotiated_offer_id=${offer.id}`}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors"
+                >
+                  <span>Shop Product</span>
+                </Link>
+              </>
             )}
 
             {/* 5. Closed / Expired -> Shop Product */}
             {(isExpired || offer.status === 'REJECTED' || offer.status === 'CUSTOMER_REJECTED' || offer.status === 'MERCHANT_REJECTED' || offer.status === 'EXPIRED') && (
               <Link
-                href={`/shopping?product_id=${offer.product_id}`}
+                href={`/shopping/${offer.product_id}?negotiated_offer_id=${offer.id}`}
                 className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors"
               >
                 <span>Shop Product</span>

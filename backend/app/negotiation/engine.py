@@ -769,13 +769,22 @@ class NegotiationEngine:
             raise ValueError(f"Tenant mismatch: Offer belongs to {offer.merchant_id}.")
 
         now_utc = datetime.now(timezone.utc)
-        if offer.expires_at.replace(tzinfo=timezone.utc) < now_utc:
-            offer.status = NegotiationState.EXPIRED.value
-            db.commit()
-            raise ValueError("Offer has expired.")
+        if offer.expires_at:
+            exp = offer.expires_at if offer.expires_at.tzinfo else offer.expires_at.replace(tzinfo=timezone.utc)
+            if exp < now_utc or offer.status == NegotiationState.EXPIRED.value:
+                offer.status = NegotiationState.EXPIRED.value
+                db.commit()
+                raise ValueError("Price request has expired and can no longer be modified.")
 
-        if offer.status in [NegotiationState.REJECTED.value, NegotiationState.MERCHANT_REJECTED.value, NegotiationState.CUSTOMER_REJECTED.value, NegotiationState.EXPIRED.value]:
-            raise ValueError(f"Offer is in terminal state '{offer.status}' and cannot be approved.")
+        if offer.status in [
+            NegotiationState.REJECTED.value,
+            NegotiationState.MERCHANT_REJECTED.value,
+            NegotiationState.CUSTOMER_REJECTED.value,
+            NegotiationState.EXPIRED.value,
+            NegotiationState.ORDER_CONFIRMED.value,
+            NegotiationState.CANCELLED.value,
+        ]:
+            raise ValueError(f"Price request is already in terminal state '{offer.status}' and cannot be modified.")
 
         if offer.status in [NegotiationState.AUTO_ACCEPTED.value, NegotiationState.MERCHANT_APPROVED.value]:
             return offer
@@ -860,13 +869,22 @@ class NegotiationEngine:
             raise ValueError(f"Tenant mismatch: Offer belongs to {offer.merchant_id}.")
 
         now_utc = datetime.now(timezone.utc)
-        if offer.expires_at.replace(tzinfo=timezone.utc) < now_utc:
-            offer.status = NegotiationState.EXPIRED.value
-            db.commit()
-            raise ValueError("Offer has expired.")
+        if offer.expires_at:
+            exp = offer.expires_at if offer.expires_at.tzinfo else offer.expires_at.replace(tzinfo=timezone.utc)
+            if exp < now_utc or offer.status == NegotiationState.EXPIRED.value:
+                offer.status = NegotiationState.EXPIRED.value
+                db.commit()
+                raise ValueError("Price request has expired and can no longer be modified.")
 
-        if offer.status in [NegotiationState.REJECTED.value, NegotiationState.MERCHANT_REJECTED.value, NegotiationState.CUSTOMER_REJECTED.value, NegotiationState.EXPIRED.value]:
-            raise ValueError(f"Offer is in terminal state '{offer.status}' and cannot be countered.")
+        if offer.status in [
+            NegotiationState.REJECTED.value,
+            NegotiationState.MERCHANT_REJECTED.value,
+            NegotiationState.CUSTOMER_REJECTED.value,
+            NegotiationState.EXPIRED.value,
+            NegotiationState.ORDER_CONFIRMED.value,
+            NegotiationState.CANCELLED.value,
+        ]:
+            raise ValueError(f"Price request is already in terminal state '{offer.status}' and cannot be countered.")
 
         # Resolve approver user to enforce valid foreign key in users table
         resolved_user_id = NegotiationEngine._resolve_user_id(db, admin_user_id)
@@ -955,9 +973,28 @@ class NegotiationEngine:
         if offer.merchant_id != merchant_id:
             raise ValueError(f"Tenant mismatch: Offer belongs to {offer.merchant_id}.")
 
+        now_utc = datetime.now(timezone.utc)
+        if offer.expires_at:
+            exp = offer.expires_at if offer.expires_at.tzinfo else offer.expires_at.replace(tzinfo=timezone.utc)
+            if exp < now_utc or offer.status == NegotiationState.EXPIRED.value:
+                offer.status = NegotiationState.EXPIRED.value
+                db.commit()
+                raise ValueError("Price request has expired and can no longer be modified.")
+
+        if offer.status in [
+            NegotiationState.REJECTED.value,
+            NegotiationState.MERCHANT_REJECTED.value,
+            NegotiationState.CUSTOMER_REJECTED.value,
+            NegotiationState.EXPIRED.value,
+            NegotiationState.ORDER_CONFIRMED.value,
+            NegotiationState.CANCELLED.value,
+        ]:
+            if offer.status in [NegotiationState.REJECTED.value, NegotiationState.MERCHANT_REJECTED.value]:
+                return offer
+            raise ValueError(f"Price request is already in terminal state '{offer.status}' and cannot be modified.")
+
         resolved_user_id = NegotiationEngine._resolve_user_id(db, admin_user_id)
 
-        now_utc = datetime.now(timezone.utc)
         NegotiationStateMachine.validate_transition(offer.status, NegotiationState.MERCHANT_REJECTED.value)
 
         offer.status = NegotiationState.MERCHANT_REJECTED.value

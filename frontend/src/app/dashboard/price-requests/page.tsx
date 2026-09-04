@@ -176,10 +176,15 @@ export default function MerchantPriceRequestsPage() {
     let confirmed = 0;
 
     offers.forEach((o) => {
+      const isExp = o.status === 'EXPIRED' || (o.expires_at && new Date(o.expires_at).getTime() < Date.now());
       if (
-        o.status === 'HUMAN_APPROVAL_REQUIRED' ||
-        o.status === 'WAITING_FOR_MERCHANT' ||
-        o.status === 'PENDING'
+        !isExp &&
+        (o.status === 'HUMAN_APPROVAL_REQUIRED' ||
+          o.status === 'WAITING_FOR_MERCHANT' ||
+          o.status === 'OFFER_REQUESTED' ||
+          o.status === 'NEGOTIATION_STARTED' ||
+          o.status === 'MERCHANT_POLICY_EVALUATING' ||
+          o.status === 'PENDING')
       ) {
         pending++;
       } else if (
@@ -230,12 +235,18 @@ export default function MerchantPriceRequestsPage() {
 
     // Tab filter
     if (activeTab === 'PENDING') {
-      list = list.filter(
-        (o) =>
-          o.status === 'HUMAN_APPROVAL_REQUIRED' ||
-          o.status === 'WAITING_FOR_MERCHANT' ||
-          o.status === 'PENDING'
-      );
+      list = list.filter((o) => {
+        const isExp = o.status === 'EXPIRED' || (o.expires_at && new Date(o.expires_at).getTime() < Date.now());
+        return (
+          !isExp &&
+          (o.status === 'HUMAN_APPROVAL_REQUIRED' ||
+            o.status === 'WAITING_FOR_MERCHANT' ||
+            o.status === 'OFFER_REQUESTED' ||
+            o.status === 'NEGOTIATION_STARTED' ||
+            o.status === 'MERCHANT_POLICY_EVALUATING' ||
+            o.status === 'PENDING')
+        );
+      });
     } else if (activeTab === 'APPROVED') {
       list = list.filter(
         (o) =>
@@ -256,8 +267,33 @@ export default function MerchantPriceRequestsPage() {
       list = list.filter((o) => o.status === 'ORDER_CONFIRMED' || o.payment_status === 'CAPTURED');
     }
 
-    // Sort
+    // Sort: Counter-offers first, then Pending, then by selected sort option
     list.sort((a, b) => {
+      const isExpA = a.status === 'EXPIRED' || (a.expires_at && new Date(a.expires_at).getTime() < Date.now());
+      const isExpB = b.status === 'EXPIRED' || (b.expires_at && new Date(b.expires_at).getTime() < Date.now());
+
+      const getRank = (o: NegotiatedOfferRecord, exp: boolean) => {
+        if (!exp && (o.status === 'COUNTER_OFFERED' || o.status === 'MERCHANT_COUNTERED')) return 1;
+        if (
+          !exp &&
+          (o.status === 'HUMAN_APPROVAL_REQUIRED' ||
+            o.status === 'WAITING_FOR_MERCHANT' ||
+            o.status === 'OFFER_REQUESTED' ||
+            o.status === 'NEGOTIATION_STARTED' ||
+            o.status === 'MERCHANT_POLICY_EVALUATING' ||
+            o.status === 'PENDING')
+        )
+          return 2;
+        return 3;
+      };
+
+      const rankA = getRank(a, !!isExpA);
+      const rankB = getRank(b, !!isExpB);
+
+      if (rankA !== rankB) {
+        return rankA - rankB;
+      }
+
       if (activeSort === 'NEWEST') {
         return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
       }
@@ -536,10 +572,18 @@ export default function MerchantPriceRequestsPage() {
         {!loading && !error && filteredOffers.length > 0 && (
           <div className="space-y-4">
             {filteredOffers.map((offer) => {
+              const isOfferExpired =
+                offer.status === 'EXPIRED' ||
+                (offer.expires_at ? new Date(offer.expires_at).getTime() < Date.now() : false);
+
               const isPending =
-                offer.status === 'HUMAN_APPROVAL_REQUIRED' ||
-                offer.status === 'WAITING_FOR_MERCHANT' ||
-                offer.status === 'PENDING';
+                !isOfferExpired &&
+                (offer.status === 'HUMAN_APPROVAL_REQUIRED' ||
+                  offer.status === 'WAITING_FOR_MERCHANT' ||
+                  offer.status === 'OFFER_REQUESTED' ||
+                  offer.status === 'NEGOTIATION_STARTED' ||
+                  offer.status === 'MERCHANT_POLICY_EVALUATING' ||
+                  offer.status === 'PENDING');
 
               const requestedDiscountPct =
                 offer.list_total > 0 && offer.requested_total > 0
@@ -575,6 +619,11 @@ export default function MerchantPriceRequestsPage() {
                             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300 animate-pulse">
                               <span>🟠</span>
                               <span>NEEDS YOUR DECISION</span>
+                            </span>
+                          ) : isOfferExpired ? (
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-700 border border-slate-300">
+                              <span>⏱️</span>
+                              <span>EXPIRED</span>
                             </span>
                           ) : offer.status === 'MERCHANT_APPROVED' || offer.status === 'AUTO_ACCEPTED' ? (
                             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
@@ -692,11 +741,13 @@ export default function MerchantPriceRequestsPage() {
                         </div>
                       ) : (
                         <div className="text-xs text-slate-400 font-medium">
-                          {offer.status === 'ORDER_CONFIRMED' || offer.payment_status === 'CAPTURED' ? (
+                          {isOfferExpired ? (
+                            <span className="text-slate-500 font-semibold">Offer expired</span>
+                          ) : offer.status === 'ORDER_CONFIRMED' || offer.payment_status === 'CAPTURED' ? (
                             <span className="text-teal-700 font-semibold">Order placed & paid</span>
-                          ) : offer.status === 'MERCHANT_APPROVED' ? (
+                          ) : offer.status === 'MERCHANT_APPROVED' || offer.status === 'AUTO_ACCEPTED' ? (
                             <span className="text-emerald-700 font-semibold">Approved (Awaiting customer checkout)</span>
-                          ) : offer.status === 'COUNTER_OFFERED' ? (
+                          ) : offer.status === 'COUNTER_OFFERED' || offer.status === 'MERCHANT_COUNTERED' ? (
                             <span className="text-indigo-700 font-semibold">Counter sent (Awaiting customer acceptance)</span>
                           ) : (
                             <span>Request closed</span>

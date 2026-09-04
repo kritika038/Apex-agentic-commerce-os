@@ -7,6 +7,7 @@ approval workflows, offer lifecycle, and payment checkout.
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 import logging
 
@@ -196,17 +197,93 @@ def get_merchant_price_requests(
 ):
     """
     Retrieves customer price requests for authenticated merchant admin's tenant.
-    Enforces merchant_admin role and tenant isolation.
+    Enforces merchant_admin role, tenant isolation, deterministic server-side sorting,
+    and actionable filtering when requested.
     """
     if current_user.role not in ["merchant_admin", "admin"]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Merchant admin access required.")
 
     m_id = current_user.merchant_id or "merch_default"
     query = db.query(NegotiatedOffer).filter(NegotiatedOffer.merchant_id == m_id)
-    if status_filter:
-        query = query.filter(NegotiatedOffer.status == status_filter)
 
-    offers = query.order_by(NegotiatedOffer.created_at.desc()).limit(100).all()
+    now_utc = datetime.now(timezone.utc)
+    now_naive = now_utc.replace(tzinfo=None)
+
+    if status_filter:
+        s_upper = status_filter.upper()
+        if s_upper in ["PENDING", "ACTIONABLE"]:
+            query = query.filter(
+                NegotiatedOffer.status.in_([
+                    "HUMAN_APPROVAL_REQUIRED",
+                    "WAITING_FOR_MERCHANT",
+                    "OFFER_REQUESTED",
+                    "NEGOTIATION_STARTED",
+                    "MERCHANT_POLICY_EVALUATING",
+                    "PENDING",
+                ]),
+                (NegotiatedOffer.expires_at == None) | (NegotiatedOffer.expires_at > now_naive)
+            )
+        elif s_upper == "APPROVED":
+            query = query.filter(
+                NegotiatedOffer.status.in_([
+                    "MERCHANT_APPROVED",
+                    "AUTO_ACCEPTED",
+                    "CUSTOMER_OFFER_PRESENTED",
+                ])
+            )
+        elif s_upper in ["COUNTERED", "COUNTER_OFFERED"]:
+            query = query.filter(
+                NegotiatedOffer.status.in_([
+                    "COUNTER_OFFERED",
+                    "MERCHANT_COUNTERED",
+                ])
+            )
+        elif s_upper in ["DECLINED", "REJECTED"]:
+            query = query.filter(
+                NegotiatedOffer.status.in_([
+                    "REJECTED",
+                    "MERCHANT_REJECTED",
+                    "CUSTOMER_REJECTED",
+                ])
+            )
+        elif s_upper in ["CONFIRMED", "ORDER_CONFIRMED"]:
+            query = query.filter(
+                (NegotiatedOffer.status == "ORDER_CONFIRMED") | (NegotiatedOffer.payment_order_id != None)
+            )
+        elif s_upper == "EXPIRED":
+            query = query.filter(
+                (NegotiatedOffer.status == "EXPIRED") | (NegotiatedOffer.expires_at <= now_naive)
+            )
+        elif s_upper != "ALL":
+            query = query.filter(NegotiatedOffer.status == status_filter)
+
+    # Server-side authoritative sorting:
+    # Priority 1: Counter-offers (active / not expired)
+    # Priority 2: Pending / Actionable (active / not expired)
+    # Priority 3: All others
+    # Secondary order: created_at.desc()
+    priority_order = case(
+        (
+            (NegotiatedOffer.status.in_(["COUNTER_OFFERED", "MERCHANT_COUNTERED"])) &
+            ((NegotiatedOffer.expires_at == None) | (NegotiatedOffer.expires_at > now_naive)),
+            1
+        ),
+        (
+            (NegotiatedOffer.status.in_([
+                "HUMAN_APPROVAL_REQUIRED",
+                "WAITING_FOR_MERCHANT",
+                "OFFER_REQUESTED",
+                "NEGOTIATION_STARTED",
+                "MERCHANT_POLICY_EVALUATING",
+                "PENDING"
+            ])) &
+            ((NegotiatedOffer.expires_at == None) | (NegotiatedOffer.expires_at > now_naive)),
+            2
+        ),
+        else_=3
+    )
+
+    offers = query.order_by(priority_order.asc(), NegotiatedOffer.created_at.desc()).limit(200).all()
     return offers
 
 
@@ -216,7 +293,7 @@ def get_merchant_price_requests_badge(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Returns pending count (awaiting merchant decision) and total count for merchant admin.
+    Returns pending count (active non-expired requests awaiting merchant decision) and total count for merchant admin.
     """
     if current_user.role not in ["merchant_admin", "admin"]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Merchant admin access required.")
@@ -224,10 +301,26 @@ def get_merchant_price_requests_badge(
     m_id = current_user.merchant_id or "merch_default"
     offers = db.query(NegotiatedOffer).filter(NegotiatedOffer.merchant_id == m_id).all()
 
-    pending_count = sum(
-        1 for o in offers
-        if o.status in ["HUMAN_APPROVAL_REQUIRED", "WAITING_FOR_MERCHANT", "PENDING"]
-    )
+    now_utc = datetime.now(timezone.utc)
+    actionable_statuses = {
+        "HUMAN_APPROVAL_REQUIRED",
+        "WAITING_FOR_MERCHANT",
+        "OFFER_REQUESTED",
+        "NEGOTIATION_STARTED",
+        "MERCHANT_POLICY_EVALUATING",
+        "PENDING",
+    }
+
+    pending_count = 0
+    for o in offers:
+        if o.status in actionable_statuses:
+            if o.expires_at:
+                exp = o.expires_at if o.expires_at.tzinfo else o.expires_at.replace(tzinfo=timezone.utc)
+                if exp > now_utc:
+                    pending_count += 1
+            else:
+                pending_count += 1
+
     return {
         "pending_count": pending_count,
         "total_count": len(offers),

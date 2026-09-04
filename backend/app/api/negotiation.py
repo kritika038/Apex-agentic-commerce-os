@@ -195,7 +195,7 @@ def get_merchant_price_requests(
     Retrieves customer price requests for authenticated merchant admin's tenant.
     Enforces merchant_admin role and tenant isolation.
     """
-    if current_user.role != "merchant_admin":
+    if current_user.role not in ["merchant_admin", "admin"]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Merchant admin access required.")
 
     m_id = current_user.merchant_id or "merch_default"
@@ -215,7 +215,7 @@ def get_merchant_price_requests_badge(
     """
     Returns pending count (awaiting merchant decision) and total count for merchant admin.
     """
-    if current_user.role != "merchant_admin":
+    if current_user.role not in ["merchant_admin", "admin"]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Merchant admin access required.")
 
     m_id = current_user.merchant_id or "merch_default"
@@ -299,16 +299,26 @@ def merchant_approve_offer(
     offer_id: str,
     request: MerchantApproveRequest,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Merchant approves an offer requiring human approval."""
+    if current_user.role not in ["merchant_admin", "admin"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Merchant Admin privileges required."
+        )
     m_id = _resolve_merchant_id(current_user, db, request.merchant_id)
+    if current_user.merchant_id and current_user.merchant_id != m_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Merchant tenant mismatch."
+        )
     try:
         offer = NegotiationEngine.merchant_approve(
             db=db,
             offer_id=offer_id,
             merchant_id=m_id,
-            approver_email=current_user.email if current_user else "merchant_admin@apex.local",
+            admin_user_id=current_user.id,
             reason=request.reason,
         )
         return offer
@@ -324,15 +334,26 @@ def merchant_counter_offer(
     offer_id: str,
     request: MerchantCounterRequest,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Merchant provides a custom counter-offer to buyer."""
+    if current_user.role not in ["merchant_admin", "admin"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Merchant Admin privileges required."
+        )
     m_id = _resolve_merchant_id(current_user, db, request.merchant_id)
+    if current_user.merchant_id and current_user.merchant_id != m_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Merchant tenant mismatch."
+        )
     try:
         offer = NegotiationEngine.merchant_counter(
             db=db,
             offer_id=offer_id,
             merchant_id=m_id,
+            admin_user_id=current_user.id,
             counter_unit_price=request.counter_unit_price,
             counter_total=request.counter_total,
             reason=request.reason,
@@ -350,15 +371,26 @@ def merchant_reject_offer(
     offer_id: str,
     request: MerchantRejectRequest,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Merchant rejects negotiation proposal."""
+    if current_user.role not in ["merchant_admin", "admin"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Merchant Admin privileges required."
+        )
     m_id = _resolve_merchant_id(current_user, db, request.merchant_id)
+    if current_user.merchant_id and current_user.merchant_id != m_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Merchant tenant mismatch."
+        )
     try:
         offer = NegotiationEngine.merchant_reject(
             db=db,
             offer_id=offer_id,
             merchant_id=m_id,
+            admin_user_id=current_user.id,
             reason=request.reason,
         )
         return offer

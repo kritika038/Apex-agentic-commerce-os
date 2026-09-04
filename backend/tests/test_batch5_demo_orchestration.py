@@ -344,7 +344,7 @@ def test_10_unauthorized_user_cannot_access_merchant_actions(client, db, demo_se
         f"/api/v1/negotiation/{offer_id}/merchant/approve",
         json={"merchant_id": "rogue_merchant_b", "reason": "Unauthorized bypass"}
     )
-    assert resp.status_code in [400, 403, 404, 422]
+    assert resp.status_code in [400, 401, 403, 404, 422]
 
 
 def test_11_judge_demo_does_not_bypass_authentication(client, db, demo_setup):

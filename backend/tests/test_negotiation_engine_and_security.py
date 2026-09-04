@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.database.session import get_db
+from app.database.models.user import User
 from app.database.models.product import Product
 from app.database.models.merchant import Merchant
 from app.database.models.negotiation_policy import MerchantNegotiationPolicy
@@ -13,6 +14,7 @@ from app.database.models.approval_request import ApprovalRequest
 from app.database.models.audit_event import AuditEvent
 from app.negotiation.engine import NegotiationEngine
 from app.negotiation.state_machine import NegotiationState, NegotiationStateMachine, StateTransitionError
+from app.core.security import create_access_token, get_password_hash
 
 
 @pytest.fixture
@@ -27,6 +29,23 @@ def test_setup(db):
             is_active=True
         )
         db.add(merchant)
+
+    # Setup merchant admin user
+    merchant_user = db.query(User).filter(User.email == "merchant_admin@apex-test.local").first()
+    if not merchant_user:
+        merchant_user = User(
+            email="merchant_admin@apex-test.local",
+            hashed_password=get_password_hash("password123"),
+            full_name="Apex Test Merchant Admin",
+            merchant_id="merch_test",
+            role="merchant_admin",
+            is_active=True
+        )
+        db.add(merchant_user)
+        db.flush()
+
+    token = create_access_token(subject=merchant_user.id, merchant_id="merch_test", role="merchant_admin")
+    headers = {"Authorization": f"Bearer {token}"}
 
     # Setup standard negotiation policy: max 5% discount, auto-accept <= 3%, human approval between 3% and 5%
     policy = db.query(MerchantNegotiationPolicy).filter(MerchantNegotiationPolicy.merchant_id == "merch_test").first()
@@ -78,7 +97,7 @@ def test_setup(db):
         product.price = Decimal("5000.00")
 
     db.commit()
-    return {"merchant": merchant, "policy": policy, "product": product}
+    return {"merchant": merchant, "policy": policy, "product": product, "headers": headers, "merchant_user": merchant_user}
 
 
 def test_scenario_a_auto_acceptance(client, db, test_setup):
@@ -157,7 +176,8 @@ def test_scenario_c_merchant_approves_human_gated_offer(client, db, test_setup):
     # Merchant approves
     approve_resp = client.post(
         f"/api/v1/negotiation/{offer_id}/merchant/approve",
-        json={"merchant_id": "merch_test", "reason": "VIP repeat customer discount approved"}
+        json={"merchant_id": "merch_test", "reason": "VIP repeat customer discount approved"},
+        headers=test_setup["headers"]
     )
     assert approve_resp.status_code == 200
     appr_data = approve_resp.json()
@@ -353,12 +373,28 @@ def test_security_02_tenant_isolation_merchant_approval(client, db, test_setup):
     )
     offer_id = resp.json()["offer"]["id"]
 
-    # Rogue merchant tries to approve
+    # Rogue merchant admin tries to approve
+    rogue_user = db.query(User).filter(User.email == "rogue@merch_other_rogue.local").first()
+    if not rogue_user:
+        rogue_user = User(
+            email="rogue@merch_other_rogue.local",
+            hashed_password=get_password_hash("password123"),
+            full_name="Rogue Admin",
+            merchant_id="merch_other_rogue",
+            role="merchant_admin",
+            is_active=True
+        )
+        db.add(rogue_user)
+        db.flush()
+    rogue_token = create_access_token(subject=rogue_user.id, merchant_id="merch_other_rogue", role="merchant_admin")
+    rogue_headers = {"Authorization": f"Bearer {rogue_token}"}
+
     rogue_resp = client.post(
         f"/api/v1/negotiation/{offer_id}/merchant/approve",
-        json={"merchant_id": "merch_other_rogue", "reason": "Unauthorized override"}
+        json={"merchant_id": "merch_other_rogue", "reason": "Unauthorized override"},
+        headers=rogue_headers
     )
-    assert rogue_resp.status_code == 400
+    assert rogue_resp.status_code in [400, 403]
     assert "tenant mismatch" in rogue_resp.json()["detail"].lower()
 
 
@@ -692,7 +728,8 @@ def test_security_18_cannot_approve_already_rejected_offer(client, db, test_setu
     # Attempt merchant approval on terminal rejected offer
     appr_resp = client.post(
         f"/api/v1/negotiation/{offer_id}/merchant/approve",
-        json={"merchant_id": "merch_test"}
+        json={"merchant_id": "merch_test"},
+        headers=test_setup["headers"]
     )
     assert appr_resp.status_code == 500 or appr_resp.status_code == 400
 
@@ -743,7 +780,8 @@ def test_security_22_merchant_counter_custom_price(client, db, test_setup):
 
     counter_resp = client.post(
         f"/api/v1/negotiation/{offer_id}/merchant/counter",
-        json={"merchant_id": "merch_test", "counter_unit_price": 4850.00, "reason": "Counter offer ₹4,850"}
+        json={"merchant_id": "merch_test", "counter_unit_price": 4850.00, "reason": "Counter offer ₹4,850"},
+        headers=test_setup["headers"]
     )
     assert counter_resp.status_code == 200
     c_data = counter_resp.json()
@@ -761,7 +799,8 @@ def test_security_23_merchant_reject_flow(client, db, test_setup):
 
     rej_resp = client.post(
         f"/api/v1/negotiation/{offer_id}/merchant/reject",
-        json={"merchant_id": "merch_test", "reason": "Inventory low"}
+        json={"merchant_id": "merch_test", "reason": "Inventory low"},
+        headers=test_setup["headers"]
     )
     assert rej_resp.status_code == 200
     assert rej_resp.json()["status"] == NegotiationState.MERCHANT_REJECTED.value

@@ -9,6 +9,7 @@ from app.database.models.transaction_authorization import TransactionAuthorizati
 from app.database.models.purchase_intent import PurchaseIntent
 from app.database.models.policy import Policy
 from app.database.models.policy_evaluation import PolicyEvaluation
+from app.database.models.user import User
 
 class ApprovalService:
     """
@@ -93,9 +94,18 @@ class ApprovalService:
                 detail=f"Approval request is already in '{req.status}' state and cannot be approved again."
             )
 
-        # 2. Transition ApprovalRequest
+        # 2. Resolve valid User.id for foreign key compliance
+        valid_user_id = None
+        if user_id:
+            u = db.query(User).filter(User.id == user_id).first()
+            if not u:
+                u = db.query(User).filter(User.email.ilike(user_id)).first()
+            if u:
+                valid_user_id = u.id
+
+        # 3. Transition ApprovalRequest
         req.status = "APPROVED"
-        req.approved_by_user_id = user_id
+        req.approved_by_user_id = valid_user_id
         req.approved_at = now
 
         # 3. Retrieve policy to get authorization expiration setting
@@ -203,8 +213,17 @@ class ApprovalService:
                 detail=f"Approval request is already in '{req.status}' state and cannot be rejected."
             )
 
+        valid_user_id = None
+        if user_id:
+            u = db.query(User).filter(User.id == user_id).first()
+            if not u:
+                u = db.query(User).filter(User.email.ilike(user_id)).first()
+            if u:
+                valid_user_id = u.id
+
         req.status = "REJECTED"
-        req.approved_by_user_id = user_id
+        req.approved_by_user_id = valid_user_id
+        req.rejected_at = now
         req.reason = reason or req.reason
 
         intent = db.query(PurchaseIntent).filter(PurchaseIntent.id == req.purchase_intent_id).first()

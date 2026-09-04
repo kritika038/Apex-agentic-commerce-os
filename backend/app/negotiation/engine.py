@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 import uuid
 import logging
 
+from app.database.models.user import User
 from app.database.models.base import generate_uuid
 from app.database.models.product import Product
 from app.database.models.merchant import Merchant
@@ -684,6 +685,24 @@ class NegotiationEngine:
         return offer
 
     @staticmethod
+    def _resolve_user_id(db: Session, admin_user_id: Optional[str]) -> Optional[str]:
+        """
+        Resolves admin_user_id (which could be a UUID or email) to an existing User.id (UUID).
+        Returns the User.id if found, or None if not found in database.
+        """
+        if not admin_user_id:
+            return None
+        # Try direct lookup by User.id
+        u = db.query(User).filter(User.id == admin_user_id).first()
+        if u:
+            return u.id
+        # Try lookup by User.email
+        u = db.query(User).filter(User.email.ilike(admin_user_id)).first()
+        if u:
+            return u.id
+        return None
+
+    @staticmethod
     def merchant_approve(
         db: Session,
         offer_id: str,
@@ -693,7 +712,7 @@ class NegotiationEngine:
         reason: Optional[str] = None
     ) -> NegotiatedOffer:
         """Alias for merchant_approve_offer."""
-        admin_id = approver_email or admin_user_id or "merchant_admin@apex.local"
+        admin_id = admin_user_id or approver_email
         return NegotiationEngine.merchant_approve_offer(
             db=db,
             offer_id=offer_id,
@@ -707,7 +726,7 @@ class NegotiationEngine:
         db: Session,
         offer_id: str,
         merchant_id: str,
-        admin_user_id: str,
+        admin_user_id: Optional[str] = None,
         reason: Optional[str] = None
     ) -> NegotiatedOffer:
         """Merchant administrator approves a human-approval-required negotiation."""
@@ -732,6 +751,12 @@ class NegotiationEngine:
         if offer.status in [NegotiationState.AUTO_ACCEPTED.value, NegotiationState.MERCHANT_APPROVED.value]:
             return offer
 
+        # Resolve approver user to enforce valid foreign key in users table
+        resolved_user_id = NegotiationEngine._resolve_user_id(db, admin_user_id)
+        if admin_user_id and not resolved_user_id:
+            if offer.merchant_approval_request_id:
+                raise ValueError(f"Approver user record not found in system for user '{admin_user_id}'.")
+
         # When merchant approves, offer becomes AUTO_ACCEPTED / ready for customer
         offer.status = NegotiationState.AUTO_ACCEPTED.value
         offer.merchant_decision = "APPROVED"
@@ -742,7 +767,7 @@ class NegotiationEngine:
             appr = db.query(ApprovalRequest).filter(ApprovalRequest.id == offer.merchant_approval_request_id).first()
             if appr:
                 appr.status = "APPROVED"
-                appr.approved_by_user_id = admin_user_id
+                appr.approved_by_user_id = resolved_user_id
                 appr.approved_at = now_utc
 
         db.commit()
@@ -753,7 +778,7 @@ class NegotiationEngine:
             merchant_id=offer.merchant_id,
             trace_id=offer.trace_id or f"trc_{offer.id}",
             actor_type="MERCHANT_ADMIN",
-            actor_id=admin_user_id,
+            actor_id=resolved_user_id or admin_user_id or "merchant_admin",
             action="APPROVE_NEGOTIATION",
             event_type="MERCHANT_APPROVED",
             status="SUCCESS",
@@ -775,12 +800,11 @@ class NegotiationEngine:
         admin_user_id: Optional[str] = None
     ) -> NegotiatedOffer:
         """Alias for merchant_counter_offer."""
-        admin_id = admin_user_id or "merchant_admin@apex.local"
         return NegotiationEngine.merchant_counter_offer(
             db=db,
             offer_id=offer_id,
             merchant_id=merchant_id,
-            admin_user_id=admin_id,
+            admin_user_id=admin_user_id,
             counter_unit_price=counter_unit_price,
             counter_total=counter_total,
             message=reason
@@ -791,7 +815,7 @@ class NegotiationEngine:
         db: Session,
         offer_id: str,
         merchant_id: str,
-        admin_user_id: str,
+        admin_user_id: Optional[str] = None,
         counter_unit_price: Optional[Decimal] = None,
         counter_total: Optional[Decimal] = None,
         message: Optional[str] = None
@@ -811,6 +835,15 @@ class NegotiationEngine:
             offer.status = NegotiationState.EXPIRED.value
             db.commit()
             raise ValueError("Offer has expired.")
+
+        if offer.status in [NegotiationState.REJECTED.value, NegotiationState.MERCHANT_REJECTED.value, NegotiationState.CUSTOMER_REJECTED.value, NegotiationState.EXPIRED.value]:
+            raise ValueError(f"Offer is in terminal state '{offer.status}' and cannot be countered.")
+
+        # Resolve approver user to enforce valid foreign key in users table
+        resolved_user_id = NegotiationEngine._resolve_user_id(db, admin_user_id)
+        if admin_user_id and not resolved_user_id:
+            if offer.merchant_approval_request_id:
+                raise ValueError(f"Approver user record not found in system for user '{admin_user_id}'.")
 
         if counter_total is None and counter_unit_price is not None:
             c_total = Decimal(str(counter_unit_price)) * Decimal(offer.quantity)
@@ -836,7 +869,7 @@ class NegotiationEngine:
             appr = db.query(ApprovalRequest).filter(ApprovalRequest.id == offer.merchant_approval_request_id).first()
             if appr:
                 appr.status = "APPROVED"
-                appr.approved_by_user_id = admin_user_id
+                appr.approved_by_user_id = resolved_user_id
                 appr.approved_at = now_utc
 
         db.commit()
@@ -847,7 +880,7 @@ class NegotiationEngine:
             merchant_id=offer.merchant_id,
             trace_id=offer.trace_id or f"trc_{offer.id}",
             actor_type="MERCHANT_ADMIN",
-            actor_id=admin_user_id,
+            actor_id=resolved_user_id or admin_user_id or "merchant_admin",
             action="COUNTER_NEGOTIATION",
             event_type="MERCHANT_COUNTERED",
             status="SUCCESS",
@@ -867,12 +900,11 @@ class NegotiationEngine:
         admin_user_id: Optional[str] = None
     ) -> NegotiatedOffer:
         """Alias for merchant_reject_offer."""
-        admin_id = admin_user_id or "merchant_admin@apex.local"
         return NegotiationEngine.merchant_reject_offer(
             db=db,
             offer_id=offer_id,
             merchant_id=merchant_id,
-            admin_user_id=admin_id,
+            admin_user_id=admin_user_id,
             reason=reason
         )
 
@@ -881,7 +913,7 @@ class NegotiationEngine:
         db: Session,
         offer_id: str,
         merchant_id: str,
-        admin_user_id: str,
+        admin_user_id: Optional[str] = None,
         reason: Optional[str] = None
     ) -> NegotiatedOffer:
         """Merchant admin rejects the negotiation."""
@@ -893,6 +925,8 @@ class NegotiationEngine:
 
         if offer.merchant_id != merchant_id:
             raise ValueError(f"Tenant mismatch: Offer belongs to {offer.merchant_id}.")
+
+        resolved_user_id = NegotiationEngine._resolve_user_id(db, admin_user_id)
 
         now_utc = datetime.now(timezone.utc)
         NegotiationStateMachine.validate_transition(offer.status, NegotiationState.MERCHANT_REJECTED.value)
@@ -916,14 +950,14 @@ class NegotiationEngine:
             merchant_id=offer.merchant_id,
             trace_id=offer.trace_id or f"trc_{offer.id}",
             actor_type="MERCHANT_ADMIN",
-            actor_id=admin_user_id,
+            actor_id=resolved_user_id or admin_user_id or "merchant_admin",
             action="REJECT_NEGOTIATION",
             event_type="MERCHANT_REJECTED",
-            status="REJECTED",
+            status="SUCCESS",
             resource_type="NEGOTIATED_OFFER",
             resource_id=offer.id,
             new_state=NegotiationState.MERCHANT_REJECTED.value,
-            metadata_json={"reason": offer.merchant_message}
+            metadata_json={"decision": "REJECT", "reason": reason}
         )
         return offer
 

@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
 from fastapi.testclient import TestClient
 
+from app.database.models.user import User
 from app.database.models.product import Product
 from app.database.models.merchant import Merchant
 from app.database.models.policy import Policy
@@ -115,9 +116,11 @@ def test_c_negotiation_reaches_valid_counter_offer_when_discount_exceeds_max(db:
 
 
 def test_d_merchant_approval_workflow(db: Session):
-    """Test D: Merchant admin approves a pending human approval offer, moving it to AUTO_ACCEPTED."""
+    """Test D: Merchant admin approves a pending human approval offer, moving it to AUTO_ACCEPTED and binding valid User UUID."""
     merchant = db.query(Merchant).filter(Merchant.name == "Apex Sports Merchant").first()
     product = db.query(Product).filter(Product.merchant_id == merchant.id, Product.is_active == True).first()
+    demo_merchant = db.query(User).filter(User.email == "demo-merchant@apex.test").first()
+    assert demo_merchant is not None
 
     list_price = Decimal(str(product.price))
     requested_total = (list_price * Decimal("0.96")).quantize(Decimal("0.01"))
@@ -133,22 +136,23 @@ def test_d_merchant_approval_workflow(db: Session):
     )
     assert offer.status == NegotiationState.HUMAN_APPROVAL_REQUIRED.value
 
-    # Merchant admin approves
+    # Merchant admin approves using demo_merchant.id (UUID)
     approved_offer = NegotiationEngine.merchant_approve_offer(
         db=db,
         offer_id=offer.id,
         merchant_id=merchant.id,
-        admin_user_id="merchant_admin@apex.local",
+        admin_user_id=demo_merchant.id,
         reason="Approved by store manager"
     )
 
     assert approved_offer.status == NegotiationState.AUTO_ACCEPTED.value
     assert approved_offer.merchant_decision == "APPROVED"
 
-    # Verify ApprovalRequest updated
+    # Verify ApprovalRequest updated and approved_by_user_id is the exact User UUID (foreign key compliant)
     appr = db.query(ApprovalRequest).filter(ApprovalRequest.id == approved_offer.merchant_approval_request_id).first()
     assert appr.status == "APPROVED"
-    assert appr.approved_by_user_id == "merchant_admin@apex.local"
+    assert appr.approved_by_user_id == demo_merchant.id
+    assert appr.approved_by_user_id != demo_merchant.email
 
 
 def test_e_excessive_discount_or_zero_price_handled_safely(db: Session):
@@ -321,3 +325,133 @@ def test_j_audit_events_recorded_with_trace_id(db: Session):
     actions = [e.action for e in events]
     assert "START_NEGOTIATION" in actions
     assert "AUTO_ACCEPT_NEGOTIATION" in actions
+
+
+def test_k_merchant_approval_resolves_email_to_user_uuid_and_never_stores_raw_email(db: Session):
+    """Test K: Passing merchant email to merchant_approve automatically resolves to user.id (UUID) and never stores email."""
+    merchant = db.query(Merchant).filter(Merchant.name == "Apex Sports Merchant").first()
+    product = db.query(Product).filter(Product.merchant_id == merchant.id, Product.is_active == True).first()
+    demo_merchant = db.query(User).filter(User.email == "demo-merchant@apex.test").first()
+    assert demo_merchant is not None
+
+    list_price = Decimal(str(product.price))
+    requested_total = (list_price * Decimal("0.96")).quantize(Decimal("0.01"))
+
+    offer, _ = NegotiationEngine.evaluate_negotiation(
+        db=db,
+        merchant=merchant,
+        product=product,
+        quantity=1,
+        requested_total=requested_total,
+        buyer_user_id="cust_test_k@example.com",
+        trace_id="trc_test_k_001"
+    )
+
+    # Approve by passing email string "demo-merchant@apex.test"
+    approved_offer = NegotiationEngine.merchant_approve(
+        db=db,
+        offer_id=offer.id,
+        merchant_id=merchant.id,
+        approver_email="demo-merchant@apex.test",
+        reason="Approving via email lookup"
+    )
+
+    assert approved_offer.status == NegotiationState.AUTO_ACCEPTED.value
+    appr = db.query(ApprovalRequest).filter(ApprovalRequest.id == approved_offer.merchant_approval_request_id).first()
+    assert appr is not None
+    assert appr.status == "APPROVED"
+    assert appr.approved_by_user_id == demo_merchant.id
+    assert appr.approved_by_user_id != "demo-merchant@apex.test"
+
+
+def test_l_merchant_counter_resolves_user_uuid(db: Session):
+    """Test L: Countering an offer sets approved_by_user_id to the merchant User UUID."""
+    merchant = db.query(Merchant).filter(Merchant.name == "Apex Sports Merchant").first()
+    product = db.query(Product).filter(Product.merchant_id == merchant.id, Product.is_active == True).first()
+    demo_merchant = db.query(User).filter(User.email == "demo-merchant@apex.test").first()
+    assert demo_merchant is not None
+
+    list_price = Decimal(str(product.price))
+    requested_total = (list_price * Decimal("0.96")).quantize(Decimal("0.01"))
+
+    offer, _ = NegotiationEngine.evaluate_negotiation(
+        db=db,
+        merchant=merchant,
+        product=product,
+        quantity=1,
+        requested_total=requested_total,
+        buyer_user_id="cust_test_l@example.com",
+        trace_id="trc_test_l_001"
+    )
+
+    counter_total = (list_price * Decimal("0.97")).quantize(Decimal("0.01"))
+    countered_offer = NegotiationEngine.merchant_counter_offer(
+        db=db,
+        offer_id=offer.id,
+        merchant_id=merchant.id,
+        admin_user_id=demo_merchant.id,
+        counter_total=counter_total,
+        message="Countering with 3% discount"
+    )
+
+    assert countered_offer.status == NegotiationState.COUNTER_OFFERED.value
+    appr = db.query(ApprovalRequest).filter(ApprovalRequest.id == countered_offer.merchant_approval_request_id).first()
+    assert appr is not None
+    assert appr.approved_by_user_id == demo_merchant.id
+
+
+def test_m_customer_forbidden_from_merchant_endpoints_403(client, db):
+    """Test M: Customer role receives 403 Forbidden when calling merchant approval/counter/reject endpoints."""
+    from app.core.security import create_access_token
+    customer = db.query(User).filter(User.email == "customer@demo-sports.test").first()
+    assert customer is not None
+    assert customer.role == "customer"
+
+    token = create_access_token(subject=customer.id, merchant_id=customer.merchant_id, role=customer.role)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Attempt to call merchant approve
+    resp = client.post(
+        "/api/v1/negotiation/fake_offer_id/merchant/approve",
+        json={"merchant_id": customer.merchant_id, "reason": "Rogue approval"},
+        headers=headers
+    )
+    assert resp.status_code == 403
+    assert "privileges required" in resp.json()["detail"].lower() or "merchant" in resp.json()["detail"].lower()
+
+
+def test_n_unauthenticated_forbidden_from_merchant_endpoints_401(client):
+    """Test N: Unauthenticated requests receive 401 Unauthorized when calling merchant approval endpoints."""
+    resp = client.post(
+        "/api/v1/negotiation/fake_offer_id/merchant/approve",
+        json={"merchant_id": "merch_default", "reason": "No auth"}
+    )
+    assert resp.status_code == 401
+
+
+def test_o_approver_user_not_found_raises_clean_error(db: Session):
+    """Test O: If an invalid/non-existent user ID is passed to merchant_approve_offer, a clean ValueError is raised."""
+    merchant = db.query(Merchant).filter(Merchant.name == "Apex Sports Merchant").first()
+    product = db.query(Product).filter(Product.merchant_id == merchant.id, Product.is_active == True).first()
+
+    list_price = Decimal(str(product.price))
+    requested_total = (list_price * Decimal("0.96")).quantize(Decimal("0.01"))
+
+    offer, _ = NegotiationEngine.evaluate_negotiation(
+        db=db,
+        merchant=merchant,
+        product=product,
+        quantity=1,
+        requested_total=requested_total,
+        buyer_user_id="cust_test_o@example.com",
+        trace_id="trc_test_o_001"
+    )
+
+    with pytest.raises(ValueError, match="Approver user record not found"):
+        NegotiationEngine.merchant_approve_offer(
+            db=db,
+            offer_id=offer.id,
+            merchant_id=merchant.id,
+            admin_user_id="non_existent_user_12345",
+            reason="Should fail cleanly"
+        )

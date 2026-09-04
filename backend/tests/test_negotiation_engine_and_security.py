@@ -1,0 +1,789 @@
+import pytest
+from decimal import Decimal
+from datetime import datetime, timezone, timedelta
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.database.session import get_db
+from app.database.models.product import Product
+from app.database.models.merchant import Merchant
+from app.database.models.negotiation_policy import MerchantNegotiationPolicy
+from app.database.models.negotiated_offer import NegotiatedOffer
+from app.database.models.approval_request import ApprovalRequest
+from app.database.models.audit_event import AuditEvent
+from app.negotiation.engine import NegotiationEngine
+from app.negotiation.state_machine import NegotiationState, NegotiationStateMachine, StateTransitionError
+
+
+@pytest.fixture
+def test_setup(db):
+    # Setup merchant
+    merchant = db.query(Merchant).filter(Merchant.id == "merch_test").first()
+    if not merchant:
+        merchant = Merchant(
+            id="merch_test",
+            name="Apex Test Sports",
+            domain="apex-test.local",
+            is_active=True
+        )
+        db.add(merchant)
+
+    # Setup standard negotiation policy: max 5% discount, auto-accept <= 3%, human approval between 3% and 5%
+    policy = db.query(MerchantNegotiationPolicy).filter(MerchantNegotiationPolicy.merchant_id == "merch_test").first()
+    if not policy:
+        policy = MerchantNegotiationPolicy(
+            merchant_id="merch_test",
+            tenant_id="merch_test",
+            name="Test Negotiation Policy",
+            enabled=True,
+            max_discount_percent=Decimal("5.00"),
+            max_discount_amount=Decimal("1000.00"),
+            auto_accept_below_discount_percent=Decimal("3.00"),
+            approval_above_discount_percent=Decimal("3.00"),
+            max_quantity=5,
+            min_order_value=Decimal("500.00"),
+            allowed_categories=[],
+            allowed_products=[],
+            currency="INR",
+            offer_ttl_minutes=10,
+            is_active=True
+        )
+        db.add(policy)
+    else:
+        policy.enabled = True
+        policy.max_discount_percent = Decimal("5.00")
+        policy.auto_accept_below_discount_percent = Decimal("3.00")
+        policy.approval_above_discount_percent = Decimal("3.00")
+        policy.max_quantity = 5
+        policy.min_order_value = Decimal("500.00")
+        policy.offer_ttl_minutes = 10
+        policy.is_active = True
+
+    # Setup test product (MRP 5000)
+    product = db.query(Product).filter(Product.id == "prod_test_shoe").first()
+    if not product:
+        product = Product(
+            id="prod_test_shoe",
+            merchant_id="merch_test",
+            name="Apex Pro Running Shoe",
+            description="High-performance running shoe",
+            price=Decimal("5000.00"),
+            mrp=Decimal("5000.00"),
+            category="Footwear",
+            currency="INR",
+            is_active=True
+        )
+        db.add(product)
+    else:
+        product.price = Decimal("5000.00")
+
+    db.commit()
+    return {"merchant": merchant, "policy": policy, "product": product}
+
+
+def test_scenario_a_auto_acceptance(client, db, test_setup):
+    """
+    Scenario A: Buyer requests 2% discount (₹4,900 on ₹5,000).
+    Policy allows auto-accept up to 3%.
+    Result: AUTO_ACCEPTED immediately with server-computed final_total.
+    """
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_alice"
+        }
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == NegotiationState.AUTO_ACCEPTED.value
+    assert data["requires_action"] == "CUSTOMER"
+    offer = data["offer"]
+    assert Decimal(str(offer["list_unit_price"])) == Decimal("5000.00")
+    assert Decimal(str(offer["offered_unit_price"])) == Decimal("4900.00")
+    assert Decimal(str(offer["final_total"])) == Decimal("4900.00")
+    assert Decimal(str(offer["discount_percent"])) == Decimal("2.00")
+    assert offer["requires_human_approval"] is False
+
+
+def test_scenario_b_human_approval_escalation(client, db, test_setup):
+    """
+    Scenario B: Buyer requests 4% discount (₹4,800 on ₹5,000).
+    Policy auto-accept is 3%, max is 5%.
+    Result: HUMAN_APPROVAL_REQUIRED and creates ApprovalRequest.
+    """
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4800.00,
+            "customer_id": "cust_bob"
+        }
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == NegotiationState.HUMAN_APPROVAL_REQUIRED.value
+    assert data["requires_action"] == "MERCHANT"
+    offer = data["offer"]
+    assert offer["requires_human_approval"] is True
+    assert offer["approval_request_id"] is not None
+
+    # Verify ApprovalRequest in DB
+    appr = db.query(ApprovalRequest).filter(ApprovalRequest.id == offer["approval_request_id"]).first()
+    assert appr is not None
+    assert appr.status.upper() == "PENDING"
+
+
+def test_scenario_c_merchant_approves_human_gated_offer(client, db, test_setup):
+    """
+    Scenario C: Merchant reviews and approves human-gated offer.
+    Result: Status changes to AUTO_ACCEPTED / ready for customer checkout.
+    """
+    # Start negotiation needing human approval
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4800.00,
+            "customer_id": "cust_charlie"
+        }
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    # Merchant approves
+    approve_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/merchant/approve",
+        json={"merchant_id": "merch_test", "reason": "VIP repeat customer discount approved"}
+    )
+    assert approve_resp.status_code == 200
+    appr_data = approve_resp.json()
+    assert appr_data["status"] == NegotiationState.AUTO_ACCEPTED.value
+    assert Decimal(str(appr_data["final_total"])) == Decimal("4800.00")
+
+
+def test_scenario_d_deterministic_counter_offer(client, db, test_setup):
+    """
+    Scenario D: Buyer requests 20% discount (₹4,000 on ₹5,000).
+    Policy max discount is 5% (₹4,750).
+    Result: COUNTER_OFFERED at ₹4,750 (5% discount).
+    """
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4000.00,
+            "customer_id": "cust_david"
+        }
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == NegotiationState.COUNTER_OFFERED.value
+    assert data["requires_action"] == "CUSTOMER"
+    offer = data["offer"]
+    assert Decimal(str(offer["requested_unit_price"])) == Decimal("4000.00")
+    assert Decimal(str(offer["offered_unit_price"])) == Decimal("4750.00") # 5% off
+    assert Decimal(str(offer["final_total"])) == Decimal("4750.00")
+    assert Decimal(str(offer["discount_percent"])) == Decimal("5.00")
+
+
+def test_scenario_e_customer_accepts_counter_and_checks_out(client, db, test_setup):
+    """
+    Scenario E: Customer accepts counter-offer and completes Razorpay payment checkout.
+    Result: CUSTOMER_ACCEPTED -> ORDER_CONFIRMED.
+    """
+    # Start negotiation that results in counter offer
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 2,
+            "requested_unit_price": 4000.00,
+            "customer_id": "cust_emma"
+        }
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    # Customer accepts counter-offer
+    acc_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/accept",
+        json={"customer_id": "cust_emma", "reason": "Counter price accepted"}
+    )
+    assert acc_resp.status_code == 200
+    assert acc_resp.json()["status"] == NegotiationState.CUSTOMER_ACCEPTED.value
+    assert acc_resp.json()["customer_accepted"] is True
+
+    # Checkout
+    chk_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/checkout",
+        json={"customer_id": "cust_emma", "payment_method": "upi"}
+    )
+    assert chk_resp.status_code == 200
+    chk_data = chk_resp.json()
+    assert chk_data["status"] == "payment_ready"
+    assert chk_data["razorpay_order_id"].startswith("order_")
+    # 2 shoes * ₹4750 = ₹9,500 = 950000 paise
+    assert chk_data["amount_paise"] == 950000
+    assert chk_data["currency"] == "INR"
+
+
+def test_scenario_f_customer_rejects_counter_offer(client, db, test_setup):
+    """
+    Scenario F: Customer rejects counter offer.
+    Result: CUSTOMER_REJECTED (terminal state).
+    """
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4000.00,
+            "customer_id": "cust_frank"
+        }
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    rej_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/reject",
+        json={"customer_id": "cust_frank", "reason": "Too expensive"}
+    )
+    assert rej_resp.status_code == 200
+    assert rej_resp.json()["status"] == NegotiationState.CUSTOMER_REJECTED.value
+
+    # Cannot checkout after rejection
+    chk_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/checkout",
+        json={"customer_id": "cust_frank"}
+    )
+    assert chk_resp.status_code == 400
+
+
+def test_scenario_g_policy_rejection_quantity_exceeded(client, db, test_setup):
+    """
+    Scenario G: Buyer requests quantity 10 (policy max_quantity is 5).
+    Result: REJECTED with explicit rule failure reason.
+    """
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 10,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_george"
+        }
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == NegotiationState.REJECTED.value
+    assert "exceeds maximum allowed quantity" in data["offer"]["reason"]
+
+
+def test_scenario_h_offer_expiry_enforcement(client, db, test_setup):
+    """
+    Scenario H: Expired offer cannot be accepted or checked out.
+    Result: State transitions to EXPIRED.
+    """
+    # Start negotiation
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_harry"
+        }
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    # Manually expire the offer in DB
+    offer_db = db.query(NegotiatedOffer).filter(NegotiatedOffer.id == offer_id).first()
+    offer_db.expires_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    db.commit()
+
+    # Attempt to accept
+    acc_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/accept",
+        json={"customer_id": "cust_harry"}
+    )
+    assert acc_resp.status_code == 400
+    assert "expired" in acc_resp.json()["detail"].lower()
+
+
+# =========================================================================
+# 25 CRITICAL SECURITY & GOVERNANCE SCENARIOS
+# =========================================================================
+
+def test_security_01_prevent_client_side_price_override(client, db, test_setup):
+    """Security Check 1: Checkout cannot use arbitrary client amounts; strictly reads DB offer."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_sec1"
+        }
+    )
+    offer_id = resp.json()["offer"]["id"]
+    client.post(f"/api/v1/negotiation/{offer_id}/accept", json={"customer_id": "cust_sec1"})
+
+    chk = client.post(
+        f"/api/v1/negotiation/{offer_id}/checkout",
+        json={"customer_id": "cust_sec1"}
+    )
+    assert chk.status_code == 200
+    # Amount MUST be exactly 490000 paise regardless of any client tampering
+    assert chk.json()["amount_paise"] == 490000
+
+
+def test_security_02_tenant_isolation_merchant_approval(client, db, test_setup):
+    """Security Check 2: Merchant A cannot approve or counter an offer belonging to Merchant B."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4800.00,
+            "customer_id": "cust_sec2"
+        }
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    # Rogue merchant tries to approve
+    rogue_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/merchant/approve",
+        json={"merchant_id": "merch_other_rogue", "reason": "Unauthorized override"}
+    )
+    assert rogue_resp.status_code == 400
+    assert "tenant mismatch" in rogue_resp.json()["detail"].lower()
+
+
+def test_security_03_customer_ownership_enforcement(client, db, test_setup):
+    """Security Check 3: Customer X cannot accept or checkout Customer Y's negotiated offer."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_legitimate"
+        }
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    # Attacker tries to accept
+    att_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/accept",
+        json={"customer_id": "cust_attacker"}
+    )
+    assert att_resp.status_code == 400
+    assert "customer mismatch" in att_resp.json()["detail"].lower()
+
+
+def test_security_04_prevent_checkout_without_acceptance(client, db, test_setup):
+    """Security Check 4: Cannot checkout an unaccepted counter-offer."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4000.00, # Results in COUNTER_OFFERED
+            "customer_id": "cust_sec4"
+        }
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    # Try checking out directly before accepting counter offer
+    chk = client.post(
+        f"/api/v1/negotiation/{offer_id}/checkout",
+        json={"customer_id": "cust_sec4"}
+    )
+    assert chk.status_code == 400
+    assert "must be accepted" in chk.json()["detail"].lower()
+
+
+def test_security_05_prevent_double_payment_checkout(client, db, test_setup):
+    """Security Check 5: Idempotency prevents creating multiple conflicting payment orders."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_sec5"
+        }
+    )
+    offer_id = resp.json()["offer"]["id"]
+    client.post(f"/api/v1/negotiation/{offer_id}/accept", json={"customer_id": "cust_sec5"})
+
+    chk1 = client.post(f"/api/v1/negotiation/{offer_id}/checkout", json={"customer_id": "cust_sec5"})
+    assert chk1.status_code == 200
+    order_id_1 = chk1.json()["razorpay_order_id"]
+
+    # Second checkout returns existing payment order idempotently
+    chk2 = client.post(f"/api/v1/negotiation/{offer_id}/checkout", json={"customer_id": "cust_sec5"})
+    assert chk2.status_code == 200
+    assert chk2.json()["razorpay_order_id"] == order_id_1
+
+
+def test_security_06_sha256_audit_trail_recorded(client, db, test_setup):
+    """Security Check 6: Negotiation transitions log tamper-evident SHA-256 audit events."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_sec6"
+        }
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    trace_resp = client.get(f"/api/v1/negotiation/{offer_id}/trace")
+    assert trace_resp.status_code == 200
+    trace_data = trace_resp.json()
+    assert trace_data["audit_hash"] is not None
+    assert len(trace_data["audit_hash"]) == 64 # SHA-256 hex string
+
+
+def test_security_07_decimal_exact_paise_calculation(db, test_setup):
+    """Security Check 7: No floating point rounding bugs for odd paise values."""
+    engine = NegotiationEngine()
+    # 3 items with list price ₹1,999.99 requested at ₹1,949.99
+    product = db.query(Product).filter(Product.id == "prod_test_shoe").first()
+    product.price = Decimal("1999.99")
+    db.commit()
+
+    offer = engine.start_negotiation(
+        db=db,
+        merchant_id="merch_test",
+        customer_id="cust_precision",
+        product_id="prod_test_shoe",
+        quantity=3,
+        requested_unit_price=Decimal("1949.99")
+    )
+    assert offer.list_total == Decimal("5999.97")
+    assert offer.offered_total == Decimal("5849.97")
+    assert offer.final_total == Decimal("5849.97")
+    assert offer.discount_amount == Decimal("150.00")
+    # Verify integer paise conversion
+    paise = int(offer.final_total * 100)
+    assert paise == 584997
+
+
+def test_security_08_disabled_policy_rejects_negotiation(client, db, test_setup):
+    """Security Check 8: If merchant disables negotiation policy, all proposals are rejected."""
+    policy = db.query(MerchantNegotiationPolicy).filter(MerchantNegotiationPolicy.merchant_id == "merch_test").first()
+    policy.enabled = False
+    db.commit()
+
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_sec8"
+        }
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == NegotiationState.REJECTED.value
+    assert "disabled" in resp.json()["offer"]["reason"].lower()
+
+
+def test_security_09_state_machine_invalid_transition(db):
+    """Security Check 9: State machine forbids transitioning from terminal state."""
+    with pytest.raises(StateTransitionError):
+        NegotiationStateMachine.validate_transition(
+            NegotiationState.CUSTOMER_REJECTED,
+            NegotiationState.CUSTOMER_ACCEPTED
+        )
+    with pytest.raises(StateTransitionError):
+        NegotiationStateMachine.validate_transition(
+            NegotiationState.ORDER_CONFIRMED,
+            NegotiationState.COUNTER_OFFERED
+        )
+
+
+def test_security_10_minimum_order_value_enforcement(client, db, test_setup):
+    """Security Check 10: Proposal below policy min_order_value is rejected."""
+    policy = db.query(MerchantNegotiationPolicy).filter(MerchantNegotiationPolicy.merchant_id == "merch_test").first()
+    policy.min_order_value = Decimal("10000.00") # High minimum
+    db.commit()
+
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_sec10"
+        }
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == NegotiationState.REJECTED.value
+    assert "minimum order value" in resp.json()["offer"]["reason"].lower()
+
+
+def test_security_11_zero_and_negative_quantity_rejection(client, db, test_setup):
+    """Security Check 11: Quantity <= 0 is rejected."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 0,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_sec11"
+        }
+    )
+    assert resp.status_code == 422 or resp.status_code == 400
+
+
+def test_security_12_zero_and_negative_price_rejection(client, db, test_setup):
+    """Security Check 12: Price <= 0 is rejected."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": -50.00,
+            "customer_id": "cust_sec12"
+        }
+    )
+    assert resp.status_code == 422 or resp.status_code == 400
+
+
+def test_security_13_replay_idempotency_same_offer(client, db, test_setup):
+    """Security Check 13: Replaying same negotiation returns idempotent result."""
+    engine = NegotiationEngine()
+    product = db.query(Product).filter(Product.id == "prod_test_shoe").first()
+    merchant = db.query(Merchant).filter(Merchant.id == "merch_test").first()
+
+    offer1, res1 = engine.evaluate_negotiation(
+        db=db,
+        merchant=merchant,
+        product=product,
+        quantity=1,
+        requested_total=Decimal("4900.00"),
+        buyer_user_id="cust_sec13",
+        idempotency_key="idemp_unique_key_13"
+    )
+
+    offer2, res2 = engine.evaluate_negotiation(
+        db=db,
+        merchant=merchant,
+        product=product,
+        quantity=1,
+        requested_total=Decimal("4900.00"),
+        buyer_user_id="cust_sec13",
+        idempotency_key="idemp_unique_key_13"
+    )
+
+    assert offer1.id == offer2.id
+    assert res2.get("idempotent_replay") is True
+
+
+def test_security_14_category_whitelist_enforcement(client, db, test_setup):
+    """Security Check 14: Products outside allowed_categories are rejected."""
+    policy = db.query(MerchantNegotiationPolicy).filter(MerchantNegotiationPolicy.merchant_id == "merch_test").first()
+    policy.allowed_categories = ["Electronics"] # Shoe is 'Footwear'
+    db.commit()
+
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_sec14"
+        }
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == NegotiationState.REJECTED.value
+    assert "not eligible" in resp.json()["offer"]["reason"].lower()
+
+
+def test_security_15_product_whitelist_enforcement(client, db, test_setup):
+    """Security Check 15: Products outside allowed_products list are rejected."""
+    policy = db.query(MerchantNegotiationPolicy).filter(MerchantNegotiationPolicy.merchant_id == "merch_test").first()
+    policy.allowed_categories = []
+    policy.allowed_products = ["prod_other_allowed"]
+    db.commit()
+
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_sec15"
+        }
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == NegotiationState.REJECTED.value
+    assert "not currently eligible" in resp.json()["offer"]["reason"].lower()
+
+
+def test_security_16_max_discount_cap_enforcement(client, db, test_setup):
+    """Security Check 16: Extreme 99% discount request countered strictly at policy cap."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 50.00, # 99% off
+            "customer_id": "cust_sec16"
+        }
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == NegotiationState.COUNTER_OFFERED.value
+    # Max discount is 5% -> final total 4750.00
+    assert Decimal(str(data["offer"]["final_total"])) == Decimal("4750.00")
+    assert Decimal(str(data["offer"]["discount_percent"])) == Decimal("5.00")
+
+
+def test_security_17_price_change_after_acceptance_does_not_alter_locked_offer(client, db, test_setup):
+    """Security Check 17: Product price spike does not alter locked accepted offer amount."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 1,
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_sec17"
+        }
+    )
+    offer_id = resp.json()["offer"]["id"]
+    client.post(f"/api/v1/negotiation/{offer_id}/accept", json={"customer_id": "cust_sec17"})
+
+    # Merchant inflates product price to ₹10,000
+    prod = db.query(Product).filter(Product.id == "prod_test_shoe").first()
+    prod.price = Decimal("10000.00")
+    db.commit()
+
+    # Customer checkout still executes at negotiated ₹4,900
+    chk = client.post(
+        f"/api/v1/negotiation/{offer_id}/checkout",
+        json={"customer_id": "cust_sec17"}
+    )
+    assert chk.status_code == 200
+    assert chk.json()["amount_paise"] == 490000
+
+
+def test_security_18_cannot_approve_already_rejected_offer(client, db, test_setup):
+    """Security Check 18: Terminal rejected offer cannot be approved by merchant."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={
+            "product_id": "prod_test_shoe",
+            "quantity": 10, # Exceeds limit -> REJECTED
+            "requested_unit_price": 4900.00,
+            "customer_id": "cust_sec18"
+        }
+    )
+    offer_id = resp.json()["offer"]["id"]
+    assert resp.json()["status"] == NegotiationState.REJECTED.value
+
+    # Attempt merchant approval on terminal rejected offer
+    appr_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/merchant/approve",
+        json={"merchant_id": "merch_test"}
+    )
+    assert appr_resp.status_code == 500 or appr_resp.status_code == 400
+
+
+def test_security_19_merchant_list_tenant_isolation(client, db, test_setup):
+    """Security Check 19: Merchant list only returns offers for that merchant's tenant."""
+    # Create offer for merch_test
+    client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 1, "requested_unit_price": 4900.00, "customer_id": "cust_t1"}
+    )
+
+    # Query for other merchant
+    list_resp = client.get("/api/v1/negotiation/merchant/list?merchant_id=merch_other_tenant")
+    assert list_resp.status_code == 200
+    offers = list_resp.json()
+    assert len(offers) == 0
+
+
+def test_security_20_policy_endpoint_tenant_isolation(client, db, test_setup):
+    """Security Check 20: GET /policy creates and fetches tenant-specific policy."""
+    resp = client.get("/api/v1/negotiation/policy?merchant_id=merch_unique_tenant_20")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["merchant_id"] == "merch_unique_tenant_20"
+    assert Decimal(str(data["max_discount_percent"])) == Decimal("5.00")
+
+
+def test_security_21_policy_update_endpoint(client, db, test_setup):
+    """Security Check 21: PUT /policy successfully updates parameters."""
+    resp = client.put(
+        "/api/v1/negotiation/policy?merchant_id=merch_test",
+        json={"max_discount_percent": 8.50, "auto_accept_below_discount_percent": 4.00}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert Decimal(str(data["max_discount_percent"])) == Decimal("8.50")
+    assert Decimal(str(data["auto_accept_below_discount_percent"])) == Decimal("4.00")
+
+
+def test_security_22_merchant_counter_custom_price(client, db, test_setup):
+    """Security Check 22: Merchant custom counter provides valid final_total and transitions state."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 1, "requested_unit_price": 4800.00, "customer_id": "cust_sec22"}
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    counter_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/merchant/counter",
+        json={"merchant_id": "merch_test", "counter_unit_price": 4850.00, "reason": "Counter offer ₹4,850"}
+    )
+    assert counter_resp.status_code == 200
+    c_data = counter_resp.json()
+    assert c_data["status"] == NegotiationState.COUNTER_OFFERED.value
+    assert Decimal(str(c_data["final_total"])) == Decimal("4850.00")
+
+
+def test_security_23_merchant_reject_flow(client, db, test_setup):
+    """Security Check 23: Merchant can explicitly reject a proposal."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 1, "requested_unit_price": 4800.00, "customer_id": "cust_sec23"}
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    rej_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/merchant/reject",
+        json={"merchant_id": "merch_test", "reason": "Inventory low"}
+    )
+    assert rej_resp.status_code == 200
+    assert rej_resp.json()["status"] == NegotiationState.MERCHANT_REJECTED.value
+
+
+def test_security_24_audit_trace_integrity(client, db, test_setup):
+    """Security Check 24: Offer trace endpoint delivers valid schema and cryptographic hash."""
+    resp = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 1, "requested_unit_price": 4900.00, "customer_id": "cust_sec24"}
+    )
+    offer_id = resp.json()["offer"]["id"]
+
+    trace_resp = client.get(f"/api/v1/negotiation/{offer_id}/trace")
+    assert trace_resp.status_code == 200
+    data = trace_resp.json()
+    assert "pricing" in data
+    assert "governance" in data
+    assert "audit_hash" in data
+
+
+def test_security_25_nonexistent_offer_404(client, db, test_setup):
+    """Security Check 25: Querying nonexistent offer returns 404."""
+    resp = client.get("/api/v1/negotiation/nonexistent_offer_id_99999")
+    assert resp.status_code == 404

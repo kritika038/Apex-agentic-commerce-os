@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+pydantic-settings
+alembic
+razorpay
+litellm
+pytest
+python-dotenv
+pyjwt
+passlib[bcrypt]
+python-multipart
+httpx

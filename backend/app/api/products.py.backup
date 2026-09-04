@@ -1,0 +1,172 @@
+from decimal import Decimal
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from typing import List, Optional
+from app.database.session import get_db
+from app.database.models.product import Product
+from app.database.models.merchant import Merchant
+from app.database.models.user import User
+from app.schemas.product import ProductResponse, ProductCreate, ProductUpdate
+from app.auth.deps import get_current_active_user, get_optional_current_user
+
+router = APIRouter()
+
+def _enrich_product(p: Product) -> ProductResponse:
+    stock = p.inventory.stock_quantity if p.inventory else 0
+    img = (p.attributes or {}).get("image_url") if isinstance(p.attributes, dict) else None
+    return ProductResponse(
+        id=str(p.id),
+        merchant_id=str(p.merchant_id),
+        name=p.name,
+        description=p.description,
+        category=p.category,
+        price=p.price,
+        currency=p.currency or "INR",
+        attributes=p.attributes or {},
+        is_active=p.is_active,
+        stock_quantity=stock,
+        in_stock=stock > 0,
+        image_url=img
+    )
+
+@router.get("/", response_model=List[ProductResponse])
+def read_products(
+    skip: int = 0, 
+    limit: int = 100, 
+    query: Optional[str] = None,
+    category: Optional[str] = None,
+    max_price: Optional[float] = None,
+    min_price: Optional[float] = None,
+    in_stock_only: Optional[bool] = False,
+    merchant_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user)
+):
+    target_merchant_id = None
+    if current_user:
+        if not current_user.merchant_id:
+            return []
+        target_merchant_id = current_user.merchant_id
+    elif merchant_id:
+        target_merchant_id = merchant_id
+    else:
+        m = db.query(Merchant).first()
+        if m:
+            target_merchant_id = m.id
+
+    if not target_merchant_id:
+        return []
+
+    q = db.query(Product).filter(
+        Product.merchant_id == target_merchant_id,
+        Product.is_active == True
+    )
+
+    if category:
+        q = q.filter(Product.category.ilike(f"%{category}%"))
+    if max_price is not None:
+        q = q.filter(Product.price <= Decimal(str(max_price)))
+    if min_price is not None:
+        q = q.filter(Product.price >= Decimal(str(min_price)))
+    if query:
+        search_terms = query.strip().split()
+        for term in search_terms:
+            q = q.filter(
+                (Product.name.ilike(f"%{term}%")) | 
+                (Product.category.ilike(f"%{term}%")) | 
+                (Product.description.ilike(f"%{term}%"))
+            )
+
+    products = q.offset(skip).limit(limit).all()
+
+    enriched = [_enrich_product(p) for p in products]
+    if in_stock_only:
+        enriched = [p for p in enriched if p.in_stock]
+    return enriched
+
+@router.get("/{product_id}", response_model=ProductResponse)
+def read_product(
+    product_id: str, 
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user)
+):
+    q = db.query(Product).filter(Product.id == product_id)
+    if current_user:
+        if not current_user.merchant_id:
+            raise HTTPException(status_code=404, detail="Product not found")
+        q = q.filter(Product.merchant_id == current_user.merchant_id)
+    product = q.first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return _enrich_product(product)
+
+@router.post("/", response_model=ProductResponse)
+@router.post("", response_model=ProductResponse)
+def create_product(
+    product_in: ProductCreate, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    if not current_user.merchant_id:
+        raise HTTPException(status_code=403, detail="Not associated with a merchant")
+    
+    product_data = product_in.model_dump()
+    stock = product_data.pop("stock_quantity", 0)
+    
+    product = Product(
+        **product_data,
+        merchant_id=current_user.merchant_id
+    )
+    db.add(product)
+    db.flush()
+    
+    from app.database.models.inventory import Inventory
+    inventory = Inventory(
+        merchant_id=current_user.merchant_id,
+        product_id=product.id,
+        stock_quantity=stock
+    )
+    db.add(inventory)
+    db.commit()
+    db.refresh(product)
+    return _enrich_product(product)
+
+@router.put("/{product_id}", response_model=ProductResponse)
+def update_product(
+    product_id: str, 
+    product_in: ProductUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    product = db.query(Product).filter(
+        Product.id == product_id, 
+        Product.merchant_id == current_user.merchant_id
+    ).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    update_data = product_in.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(product, field, value)
+        
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+    return product
+
+@router.delete("/{product_id}")
+def delete_product(
+    product_id: str, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    product = db.query(Product).filter(
+        Product.id == product_id, 
+        Product.merchant_id == current_user.merchant_id
+    ).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    db.delete(product)
+    db.commit()
+    return {"ok": True}

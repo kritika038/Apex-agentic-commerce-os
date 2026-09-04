@@ -1,0 +1,82 @@
+# Environment & Secret files
+.env
+.env.*
+!.env.example
+*.env
+backend/.env
+frontend/.env.local
+frontend/.env.production
+frontend/.env.development
+
+# Credentials & Private Keys
+*.pem
+*.key
+*.pkcs12
+*.p12
+*.pfx
+service-account*.json
+credentials.json
+client_secret*.json
+
+# Dependencies & Local Submodules
+node_modules/
+frontend/node_modules/
+venv/
+backend/venv/
+vto_venv/
+backend/vto_venv/
+backend/fashn-vton-1.5/
+.venv/
+env/
+
+# Build artifacts
+.next/
+frontend/.next/
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Databases & Runtime State
+*.db
+*.sqlite
+*.sqlite3
+*.ses
+:memory:*.ses
+commerce_os.db
+test_commerce.db
+backend/apex.db
+backend/test.db
+backend/tests/test_commerce.db
+
+# Storage, Uploads & Debug Test Media
+backend/app/storage/vto_media/*.jpg
+backend/app/storage/vto_media/*.png
+backend/app/storage/vto_media/*.jpeg
+!backend/app/storage/vto_media/.gitkeep
+backend/debug/
+
+# Python cache & testing
+__pycache__/
+backend/**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+backend/.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs & OS artifacts
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.tempmediaStorage/
+scratch/

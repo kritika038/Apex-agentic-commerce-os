@@ -546,7 +546,7 @@ def test_security_09_state_machine_invalid_transition(db):
 
 
 def test_security_10_minimum_order_value_enforcement(client, db, test_setup):
-    """Security Check 10: Proposal below policy min_order_value is rejected."""
+    """Security Check 10: Proposal below policy min_order_value escalates to merchant review (HUMAN_APPROVAL_REQUIRED)."""
     policy = db.query(MerchantNegotiationPolicy).filter(MerchantNegotiationPolicy.merchant_id == "merch_test").first()
     policy.min_order_value = Decimal("10000.00") # High minimum
     db.commit()
@@ -561,8 +561,8 @@ def test_security_10_minimum_order_value_enforcement(client, db, test_setup):
         }
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == NegotiationState.REJECTED.value
-    assert "minimum order value" in resp.json()["offer"]["reason"].lower()
+    assert resp.json()["status"] == NegotiationState.HUMAN_APPROVAL_REQUIRED.value
+    assert resp.json()["offer"]["id"] is not None
 
 
 def test_security_11_zero_and_negative_quantity_rejection(client, db, test_setup):

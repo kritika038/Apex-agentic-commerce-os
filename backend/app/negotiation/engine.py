@@ -216,13 +216,6 @@ class NegotiationEngine:
                 expires_at
             )
 
-        if list_total < policy.min_order_value:
-            return NegotiationEngine._build_rejected_offer(
-                db, merchant, product, quantity, list_price, list_total, requested_total,
-                buyer_user_id, buyer_message, trace_id, idempotency_key, negotiation_id,
-                f"Order total ₹{list_total:,.2f} is below the minimum order value threshold of ₹{policy.min_order_value:,.2f}.",
-                expires_at
-            )
 
         stock_available = product.inventory.stock_quantity if product.inventory else 100
         if stock_available < quantity:
@@ -260,8 +253,8 @@ class NegotiationEngine:
             )
 
         # 3. Decision Tree
-        # Case A: Auto Accept (Discount <= auto_accept threshold)
-        if discount_percent <= policy.auto_accept_below_discount_percent:
+        # Case A: Auto Accept (Discount <= auto_accept threshold AND order meets minimum auto-accept order value)
+        if discount_percent <= policy.auto_accept_below_discount_percent and (policy.min_order_value <= Decimal("0.00") or list_total >= policy.min_order_value):
             offer = NegotiatedOffer(
                 tenant_id=merchant.id,
                 negotiation_id=negotiation_id,
@@ -315,8 +308,9 @@ class NegotiationEngine:
                 "status": offer.status
             }
 
-        # Case B: Human Approval Required (auto_accept < discount <= max_discount)
-        elif discount_percent <= policy.max_discount_percent:
+        # Case B: Human Approval Required (Merchant Review / Escalation)
+        # Triggered when order total is below auto-accept threshold or discount is outside auto-accept limits
+        elif list_total < policy.min_order_value or discount_percent <= policy.max_discount_percent:
             # Ensure Cart and PurchaseIntent exist for this negotiation so DB FK constraints on policy_evaluations & approval_requests succeed
             cart = db.query(Cart).filter(Cart.session_id == negotiation_id).first()
             if not cart:
@@ -359,6 +353,25 @@ class NegotiationEngine:
                 db.add(intent)
                 db.flush()
 
+            violations = []
+            if policy.min_order_value > Decimal("0.00") and list_total < policy.min_order_value:
+                violations.append(
+                    f"Order total ₹{list_total:,.2f} is below standard auto-accept threshold (₹{policy.min_order_value:,.2f}) and requires merchant approval."
+                )
+            if discount_percent > policy.max_discount_percent:
+                violations.append(
+                    f"Requested discount of {discount_percent:.1f}% exceeds standard policy limit ({policy.max_discount_percent:.1f}%) and requires merchant decision."
+                )
+            elif discount_percent > policy.auto_accept_below_discount_percent:
+                violations.append(
+                    f"Requested discount of {discount_percent:.1f}% requires merchant approval (threshold: {policy.auto_accept_below_discount_percent}%)."
+                )
+
+            if not violations:
+                violations.append("Requires merchant approval.")
+
+            risk_level = "HIGH" if discount_percent > policy.max_discount_percent else ("MEDIUM" if discount_percent > policy.auto_accept_below_discount_percent else "LOW")
+
             # Create PolicyEvaluation record
             eval_record = PolicyEvaluation(
                 merchant_id=merchant.id,
@@ -366,10 +379,10 @@ class NegotiationEngine:
                 policy_version=1,
                 purchase_intent_id=negotiation_id,
                 decision="REQUIRES_APPROVAL",
-                risk_level="MEDIUM",
+                risk_level=risk_level,
                 requires_human_approval=True,
                 checks=[{"check": "DISCOUNT_THRESHOLD", "passed": False, "discount_percent": float(discount_percent)}],
-                violations=[f"Requested discount of {discount_percent:.2f}% requires merchant approval (threshold: {policy.auto_accept_below_discount_percent}%)."],
+                violations=violations,
                 trace_id=trace_id,
                 policy_snapshot=policy.to_dict()
             )
@@ -383,9 +396,9 @@ class NegotiationEngine:
                 requested_by_agent_id="buyer_agent",
                 amount=requested_total,
                 currency=policy.currency,
-                risk_level="MEDIUM",
+                risk_level=risk_level,
                 status="PENDING",
-                reason=f"Buyer requested {discount_percent:.1f}% discount on {product.name} (Qty: {quantity}).",
+                reason=f"Buyer requested {discount_percent:.1f}% discount on {product.name} (Qty: {quantity}, ₹{requested_total:,.2f} vs list ₹{list_total:,.2f}).",
                 expires_at=expires_at.replace(tzinfo=None)
             )
             db.add(appr_req)
@@ -407,7 +420,7 @@ class NegotiationEngine:
                 discount_percent=discount_percent,
                 currency=policy.currency,
                 buyer_message=buyer_message,
-                merchant_message="Your offer is within allowable limits and has been submitted to the merchant for approval.",
+                merchant_message="Your offer is within reviewable limits and has been submitted to the merchant for approval.",
                 status=NegotiationState.HUMAN_APPROVAL_REQUIRED.value,
                 merchant_decision="HUMAN_APPROVAL",
                 merchant_decision_at=now_utc,

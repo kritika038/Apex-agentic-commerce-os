@@ -106,6 +106,19 @@ try:
 except Exception:
     pass
 
+# Ensure database has initial catalog on startup (critical for fresh Render PostgreSQL deployments)
+try:
+    from app.database.session import SessionLocal
+    from app.database.models.product import Product
+    from scripts.seed import seed_db
+
+    _init_db = SessionLocal()
+    if _init_db.query(Product).count() == 0:
+        seed_db(reset=False)
+    _init_db.close()
+except Exception:
+    pass
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json"

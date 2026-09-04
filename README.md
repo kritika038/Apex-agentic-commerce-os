@@ -6,7 +6,7 @@
 
 ### 🌐 Try Apex
 
-- **Live Storefront:** https://apex-agentic-commerce-os-k7xe-phi.vercel.app/shopping
+- **Live Storefront:** https://apex-agentic-commerce-os-k7xe-phi.vercel.app/
 - **Judge Demo:** https://apex-agentic-commerce-os-k7xe-phi.vercel.app/demo
 - **Repository:** https://github.com/kritika038/Apex-agentic-commerce-os
 

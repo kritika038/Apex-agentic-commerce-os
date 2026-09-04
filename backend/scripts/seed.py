@@ -26,7 +26,7 @@ logger = logging.getLogger("seed")
 logging.basicConfig(level=logging.INFO)
 
 
-def seed_db(reset: bool = False) -> dict:
+def seed_db(reset: bool = False, db_session: Optional[Session] = None) -> dict:
     """
     Idempotent catalog and database seeder.
     Works seamlessly with both SQLite (local/testing) and PostgreSQL (production Render).
@@ -36,12 +36,17 @@ def seed_db(reset: bool = False) -> dict:
     - Inserts missing merchants, users, stores, products, inventories, and policies.
     - Preserves existing production orders, users, payment transactions, and audit records.
     """
-    if reset:
-        logger.warning("Reset requested: Dropping all database tables...")
-        Base.metadata.drop_all(bind=engine)
+    if db_session is not None:
+        db = db_session
+        should_close = False
+    else:
+        if reset:
+            logger.warning("Reset requested: Dropping all database tables...")
+            Base.metadata.drop_all(bind=engine)
 
-    Base.metadata.create_all(bind=engine)
-    db = SessionLocal()
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+        should_close = True
 
     stats = {
         "merchants_created": 0,
@@ -165,9 +170,38 @@ def seed_db(reset: bool = False) -> dict:
         products_catalog = generate_marketplace_products()
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        # Preload existing product names and SKUs for this merchant
-        existing_prods = db.query(Product.id, Product.name, Product.sku).filter(
-            Product.merchant_id == merchant.id
+        canonical_names = {p_info["name"] for p_info in products_catalog}
+        canonical_skus = {p_info.get("sku") for p_info in products_catalog if p_info.get("sku")}
+
+        # Safe deduplication: keep exactly 1 active record per canonical product, deactivate duplicate copies
+        active_existing_prods = db.query(Product).filter(
+            Product.merchant_id == merchant.id,
+            Product.is_active == True
+        ).order_by(Product.created_at.asc(), Product.id.asc()).all()
+
+        duplicates_consolidated = 0
+        seen_canonical_names = set()
+        seen_canonical_skus = set()
+
+        for ep in active_existing_prods:
+            is_canonical = (ep.name in canonical_names) or (ep.sku and ep.sku in canonical_skus)
+            if is_canonical:
+                if ep.name in seen_canonical_names or (ep.sku and ep.sku in seen_canonical_skus):
+                    ep.is_active = False
+                    duplicates_consolidated += 1
+                else:
+                    seen_canonical_names.add(ep.name)
+                    if ep.sku:
+                        seen_canonical_skus.add(ep.sku)
+
+        if duplicates_consolidated > 0:
+            db.flush()
+            logger.info(f"Safely consolidated/deactivated {duplicates_consolidated} legacy duplicate products.")
+
+        # Preload active canonical products for this merchant
+        existing_prods = db.query(Product).filter(
+            Product.merchant_id == merchant.id,
+            Product.is_active == True
         ).all()
         existing_names = {p.name for p in existing_prods}
         existing_skus = {p.sku for p in existing_prods if p.sku}
@@ -401,7 +435,8 @@ def seed_db(reset: bool = False) -> dict:
         logger.exception(f"Error during database seed: {e}")
         raise
     finally:
-        db.close()
+        if should_close:
+            db.close()
 
 
 if __name__ == "__main__":

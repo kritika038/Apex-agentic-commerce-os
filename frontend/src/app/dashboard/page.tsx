@@ -116,6 +116,7 @@ export default function MerchantDashboard() {
   const [purchaseIntents, setPurchaseIntents] = useState<PurchaseIntentItem[]>([]);
   const [aiActivity, setAiActivity] = useState<AICommerceActivity | null>(null);
   const [opportunities, setOpportunities] = useState<RevenueOpportunity[]>([]);
+  const [pendingPriceRequests, setPendingPriceRequests] = useState<number>(0);
   const [activeTab, setActiveTab] = useState<'overview' | 'products' | 'activity' | 'ai_commerce'>('overview');
   const [isLoading, setIsLoading] = useState(false);
 
@@ -137,6 +138,16 @@ export default function MerchantDashboard() {
       setAiActivity(aiRes.data);
       const oppRes = await apiClient.get('/revenue/opportunities');
       setOpportunities(oppRes.data || []);
+
+      // Fetch pending customer price requests
+      try {
+        const badgeRes = await apiClient.get<{ pending_count: number }>('/negotiation/merchant-requests/badge');
+        if (badgeRes.data && typeof badgeRes.data.pending_count === 'number') {
+          setPendingPriceRequests(badgeRes.data.pending_count);
+        }
+      } catch {
+        // Silently skip if non-merchant or endpoint fails
+      }
     } catch (err) {
       console.error('Data load failed', err);
     } finally {
@@ -225,6 +236,36 @@ export default function MerchantDashboard() {
             </Button>
           </div>
         </div>
+
+        {/* Action Required: Pending Price Requests Alert Banner */}
+        {pendingPriceRequests > 0 && (
+          <div className="bg-gradient-to-r from-amber-500/15 via-amber-500/10 to-amber-500/5 border border-amber-300 rounded-3xl p-5 sm:p-6 shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-amber-500 text-white flex items-center justify-center font-extrabold text-xl shrink-0 shadow-xs">
+                ⚡
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-extrabold uppercase tracking-wider text-amber-900 bg-amber-200/80 px-2.5 py-0.5 rounded-lg">
+                    Action Required
+                  </span>
+                  <span className="text-xs text-amber-800 font-bold">
+                    {pendingPriceRequests} Pending Customer Price Request{pendingPriceRequests > 1 ? 's' : ''}
+                  </span>
+                </div>
+                <p className="text-xs sm:text-sm text-slate-800 mt-1 font-medium">
+                  You have <strong>{pendingPriceRequests}</strong> customer lower-price request{pendingPriceRequests > 1 ? 's' : ''} waiting for your review and approval.
+                </p>
+              </div>
+            </div>
+            <Link
+              href="/dashboard/price-requests"
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold transition-all shadow-xs shrink-0"
+            >
+              <span>Review Price Requests &rarr;</span>
+            </Link>
+          </div>
+        )}
 
         {/* Conversational Entry ("Ask Apex") */}
         <section className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-3xl p-6 sm:p-8 shadow-md space-y-4">

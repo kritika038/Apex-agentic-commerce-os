@@ -1,6 +1,6 @@
 from decimal import Decimal
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import String, Numeric, Integer, Boolean, ForeignKey, DateTime, Index
 from .base import TimeStampedBase, generate_uuid
@@ -79,6 +79,32 @@ class NegotiatedOffer(TimeStampedBase):
     @property
     def product_name(self) -> Optional[str]:
         return self.product.name if self.product else None
+
+    @property
+    def product_image_url(self) -> Optional[str]:
+        return self.product.image_url if self.product else None
+
+    @property
+    def category(self) -> Optional[str]:
+        return self.product.category if self.product else None
+
+    @property
+    def is_actionable(self) -> bool:
+        now_utc = datetime.now(timezone.utc)
+        if self.expires_at:
+            exp = self.expires_at if self.expires_at.tzinfo else self.expires_at.replace(tzinfo=timezone.utc)
+            is_not_expired = exp > now_utc
+        else:
+            is_not_expired = True
+        return is_not_expired and self.status in [
+            "AUTO_ACCEPTED",
+            "COUNTER_OFFERED",
+            "MERCHANT_APPROVED",
+            "MERCHANT_COUNTERED",
+            "CUSTOMER_OFFER_PRESENTED",
+            "CUSTOMER_ACCEPTED",
+            "PAYMENT_PENDING"
+        ] and self.status != "ORDER_CONFIRMED"
 
     @property
     def list_unit_price(self) -> Decimal:

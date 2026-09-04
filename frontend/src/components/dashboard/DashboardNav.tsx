@@ -45,6 +45,7 @@ const PRIMARY_NAV_GROUPS: NavGroup[] = [
     href: '/orders',
     items: [
       { label: 'Orders', href: '/orders', description: 'Customer and autonomous agent order history' },
+      { label: 'Price Requests', href: '/dashboard/price-requests', description: 'Customer lower-price requests and counter-offers' },
       { label: 'Purchase Intents', href: '/dashboard/approvals', description: 'Deterministic agent intent evaluation queue' },
       { label: 'Customers', href: '/dashboard#activity-tabs-section', description: 'Customer profiles and buyer agent sessions' },
     ],
@@ -90,6 +91,7 @@ export function DashboardNav() {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [pendingPriceRequests, setPendingPriceRequests] = useState<number>(0);
   const navRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -101,6 +103,32 @@ export function DashboardNav() {
         console.error('Failed to parse cached user profile', e);
       }
     }
+  }, []);
+
+  // Fetch pending price requests badge
+  useEffect(() => {
+    const fetchBadge = async () => {
+      try {
+        const token = localStorage.getItem('access_token');
+        if (!token) return;
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/negotiation/merchant-requests/badge`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && typeof data.pending_count === 'number') {
+            setPendingPriceRequests(data.pending_count);
+          }
+        }
+      } catch {
+        // Silently ignore background badge errors
+      }
+    };
+    fetchBadge();
+    const interval = setInterval(fetchBadge, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   // Close dropdown on outside click
@@ -188,6 +216,11 @@ export function DashboardNav() {
                     aria-haspopup={hasSub ? 'true' : undefined}
                   >
                     <span>{group.label}</span>
+                    {group.label === 'Orders' && pendingPriceRequests > 0 && (
+                      <span className="px-1.5 py-0.5 rounded-full text-[9px] font-extrabold bg-amber-500 text-white animate-pulse">
+                        {pendingPriceRequests}
+                      </span>
+                    )}
                     {group.badge && (
                       <span className="px-1.5 py-0.2 rounded-md text-[9px] font-bold bg-indigo-100 text-indigo-700">
                         {group.badge}
@@ -223,7 +256,14 @@ export function DashboardNav() {
                               }`}
                             >
                               <div className="font-semibold text-slate-900 flex items-center justify-between">
-                                <span>{sub.label}</span>
+                                <span className="flex items-center gap-1.5">
+                                  <span>{sub.label}</span>
+                                  {sub.label === 'Price Requests' && pendingPriceRequests > 0 && (
+                                    <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-500 text-white animate-pulse">
+                                      {pendingPriceRequests}
+                                    </span>
+                                  )}
+                                </span>
                                 <span className="text-slate-300 text-[10px]">&rarr;</span>
                               </div>
                               {sub.description && (
@@ -245,6 +285,19 @@ export function DashboardNav() {
 
         {/* Right Bar with Judge Demo & Profile */}
         <div className="flex items-center gap-3">
+          {/* Direct Price Requests Action Button if pending */}
+          {pendingPriceRequests > 0 && (
+            <Link
+              href="/dashboard/price-requests"
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs font-bold transition-all shadow-2xs"
+            >
+              <span>🔔 Price Requests</span>
+              <span className="px-1.5 py-0.2 rounded-full text-[10px] font-extrabold bg-amber-600 text-white">
+                {pendingPriceRequests}
+              </span>
+            </Link>
+          )}
+
           {/* Judge Demo Button with Dropdown */}
           <div
             className="relative hidden sm:block"
@@ -329,7 +382,14 @@ export function DashboardNav() {
                   href={group.href}
                   className="font-bold text-sm text-slate-900 flex items-center justify-between py-1"
                 >
-                  <span>{group.label}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span>{group.label}</span>
+                    {group.label === 'Orders' && pendingPriceRequests > 0 && (
+                      <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-500 text-white">
+                        {pendingPriceRequests}
+                      </span>
+                    )}
+                  </span>
                   {group.badge && (
                     <Badge variant={group.badgeVariant || 'neutral'} size="xs">
                       {group.badge}
@@ -342,9 +402,14 @@ export function DashboardNav() {
                       <Link
                         key={sub.label}
                         href={sub.href}
-                        className="block text-xs py-1 text-slate-600 hover:text-indigo-600"
+                        className="flex items-center justify-between text-xs py-1 text-slate-600 hover:text-indigo-600"
                       >
-                        {sub.label}
+                        <span>{sub.label}</span>
+                        {sub.label === 'Price Requests' && pendingPriceRequests > 0 && (
+                          <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-500 text-white">
+                            {pendingPriceRequests}
+                          </span>
+                        )}
                       </Link>
                     ))}
                   </div>

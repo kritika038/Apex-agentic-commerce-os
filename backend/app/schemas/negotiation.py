@@ -51,6 +51,9 @@ class NegotiatedOfferResponse(BaseModel):
     customer_id: str
     product_id: str
     product_name: Optional[str] = None
+    product_image_url: Optional[str] = None
+    category: Optional[str] = None
+    is_actionable: bool = False
     quantity: int
     list_unit_price: Decimal
     list_total: Decimal

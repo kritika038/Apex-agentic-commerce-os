@@ -16,6 +16,7 @@ import {
   FileTextIcon,
 } from '@/components/ui/Icons';
 import { UserProfile } from '@/lib/types/user';
+import { apiClient } from '@/lib/api';
 
 interface ProfileMenuProps {
   userProfile: UserProfile | null;
@@ -30,8 +31,30 @@ export function ProfileMenu({
   onSignOut,
 }: ProfileMenuProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [actionableCount, setActionableCount] = useState<number>(0);
   const menuRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
+
+  // Fetch actionable price requests badge
+  useEffect(() => {
+    if (!userProfile) {
+      setActionableCount(0);
+      return;
+    }
+    const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+    if (!token) return;
+
+    apiClient
+      .get<{ actionable_count: number; total_count: number }>('/negotiation/my-requests/badge')
+      .then((res) => {
+        if (res.data?.actionable_count !== undefined) {
+          setActionableCount(res.data.actionable_count);
+        }
+      })
+      .catch(() => {
+        // Silently catch
+      });
+  }, [userProfile, isOpen]);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -232,6 +255,21 @@ export function ProfileMenu({
                 >
                   <UserIcon size={14} className="text-indigo-600" />
                   <span>View Profile</span>
+                </Link>
+                <Link
+                  href="/price-requests"
+                  onClick={() => setIsOpen(false)}
+                  className="flex items-center justify-between px-3 py-2 rounded-xl text-slate-700 hover:text-slate-900 hover:bg-slate-100 font-medium transition-colors"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-sm">🏷️</span>
+                    <span>Price Requests</span>
+                  </div>
+                  {actionableCount > 0 && (
+                    <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-amber-500 text-white animate-pulse">
+                      {actionableCount}
+                    </span>
+                  )}
                 </Link>
                 <Link
                   href="/orders"

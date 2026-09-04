@@ -47,7 +47,8 @@ class NegotiationEngine:
         ).first()
 
         if not policy:
-            target_id = canonical_neg_policy_id if merchant_id in ["bdfa40d5-8af9-47b4-942b-8c9a9e3fd78a", "merch_demo", "merch_test"] or not db.query(MerchantNegotiationPolicy).filter(MerchantNegotiationPolicy.id == canonical_neg_policy_id).first() else generate_uuid()
+            existing_canonical = db.query(MerchantNegotiationPolicy).filter(MerchantNegotiationPolicy.id == canonical_neg_policy_id).first()
+            target_id = canonical_neg_policy_id if not existing_canonical else generate_uuid()
             policy = MerchantNegotiationPolicy(
                 id=target_id,
                 merchant_id=merchant_id,

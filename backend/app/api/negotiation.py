@@ -14,7 +14,7 @@ from app.database.models.user import User
 from app.database.models.merchant import Merchant
 from app.database.models.negotiated_offer import NegotiatedOffer
 from app.database.models.negotiation_policy import MerchantNegotiationPolicy
-from app.auth.deps import get_optional_current_user
+from app.auth.deps import get_current_user, get_optional_current_user
 from app.negotiation.engine import NegotiationEngine
 from app.agents.merchant_negotiation_agent import MerchantNegotiationAgent
 from app.schemas.negotiation import (
@@ -139,6 +139,96 @@ def list_merchant_negotiations(
         query = query.filter(NegotiatedOffer.status == status_filter)
     offers = query.order_by(NegotiatedOffer.created_at.desc()).limit(100).all()
     return offers
+
+
+@router.get("/my-requests", response_model=List[NegotiatedOfferResponse])
+def get_my_price_requests(
+    status_filter: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Retrieves authenticated customer's own negotiated price requests.
+    Strictly isolated to the current user.
+    """
+    identifiers = [str(current_user.id)]
+    if current_user.email:
+        identifiers.append(current_user.email)
+        identifiers.append(current_user.email.lower())
+
+    query = db.query(NegotiatedOffer).filter(NegotiatedOffer.buyer_user_id.in_(identifiers))
+    if status_filter:
+        query = query.filter(NegotiatedOffer.status == status_filter)
+
+    offers = query.order_by(NegotiatedOffer.created_at.desc()).all()
+    return offers
+
+
+@router.get("/my-requests/badge", response_model=Dict[str, int])
+def get_my_price_requests_badge(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Returns actionable and total count of price requests for authenticated customer.
+    """
+    identifiers = [str(current_user.id)]
+    if current_user.email:
+        identifiers.append(current_user.email)
+        identifiers.append(current_user.email.lower())
+
+    offers = db.query(NegotiatedOffer).filter(NegotiatedOffer.buyer_user_id.in_(identifiers)).all()
+    actionable_count = sum(1 for o in offers if o.is_actionable)
+    return {
+        "actionable_count": actionable_count,
+        "total_count": len(offers),
+    }
+
+
+@router.get("/merchant-requests", response_model=List[NegotiatedOfferResponse])
+def get_merchant_price_requests(
+    status_filter: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Retrieves customer price requests for authenticated merchant admin's tenant.
+    Enforces merchant_admin role and tenant isolation.
+    """
+    if current_user.role != "merchant_admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Merchant admin access required.")
+
+    m_id = current_user.merchant_id or "merch_default"
+    query = db.query(NegotiatedOffer).filter(NegotiatedOffer.merchant_id == m_id)
+    if status_filter:
+        query = query.filter(NegotiatedOffer.status == status_filter)
+
+    offers = query.order_by(NegotiatedOffer.created_at.desc()).limit(100).all()
+    return offers
+
+
+@router.get("/merchant-requests/badge", response_model=Dict[str, int])
+def get_merchant_price_requests_badge(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Returns pending count (awaiting merchant decision) and total count for merchant admin.
+    """
+    if current_user.role != "merchant_admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Merchant admin access required.")
+
+    m_id = current_user.merchant_id or "merch_default"
+    offers = db.query(NegotiatedOffer).filter(NegotiatedOffer.merchant_id == m_id).all()
+
+    pending_count = sum(
+        1 for o in offers
+        if o.status in ["HUMAN_APPROVAL_REQUIRED", "WAITING_FOR_MERCHANT", "PENDING"]
+    )
+    return {
+        "pending_count": pending_count,
+        "total_count": len(offers),
+    }
 
 
 @router.get("/{offer_id}", response_model=NegotiatedOfferResponse)

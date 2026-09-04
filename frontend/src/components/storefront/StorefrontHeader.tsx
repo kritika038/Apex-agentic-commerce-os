@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import {
   SparklesIcon,
@@ -10,6 +10,7 @@ import {
 } from '@/components/ui/Icons';
 import { Button } from '@/components/ui/Button';
 import { ProfileMenu } from '@/components/auth/ProfileMenu';
+import { apiClient } from '@/lib/api';
 import { UserProfile } from '@/lib/types/user';
 export type { UserProfile };
 
@@ -39,6 +40,27 @@ export function StorefrontHeader({
   userProfile,
 }: StorefrontHeaderProps) {
   const isMerchantAdmin = userProfile?.role === 'merchant_admin';
+  const [actionableCount, setActionableCount] = useState<number>(0);
+
+  useEffect(() => {
+    if (!userProfile) {
+      setActionableCount(0);
+      return;
+    }
+    const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+    if (!token) return;
+
+    apiClient
+      .get<{ actionable_count: number; total_count: number }>('/negotiation/my-requests/badge')
+      .then((res) => {
+        if (res.data?.actionable_count !== undefined) {
+          setActionableCount(res.data.actionable_count);
+        }
+      })
+      .catch(() => {
+        // Silently catch badge check errors
+      });
+  }, [userProfile]);
 
   return (
     <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200/80 shadow-2xs">
@@ -121,6 +143,24 @@ export function StorefrontHeader({
             <span className="hidden sm:inline">AI Assistant</span>
             <span className="sm:hidden">AI</span>
           </Button>
+
+          {/* Customer Price Requests (Authenticated Customer) */}
+          {userProfile && (
+            <Link
+              href="/price-requests"
+              className="relative p-2 rounded-xl text-slate-700 hover:text-slate-900 hover:bg-slate-100 transition-colors flex items-center gap-1.5 text-xs font-semibold"
+              title="My Price Requests"
+              aria-label="Price Requests"
+            >
+              <span className="text-sm">🏷️</span>
+              <span className="hidden xl:inline">Price Requests</span>
+              {actionableCount > 0 && (
+                <span className="bg-amber-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-xs animate-pulse">
+                  {actionableCount}
+                </span>
+              )}
+            </Link>
+          )}
 
           {/* Cart Icon & Trigger */}
           <button

@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { apiClient, extractErrorMessage } from '@/lib/api';
 import { loadRazorpayScript, RazorpayCheckoutOptions } from '@/lib/razorpay';
 import { Button } from '@/components/ui/Button';
@@ -84,6 +85,7 @@ export const NegotiationModal: React.FC<NegotiationModalProps> = ({
   customerEmail = 'shopper@apex.local',
   onOrderCompleted,
 }) => {
+  const router = useRouter();
   const [quantity, setQuantity] = useState<number>(1);
   const [targetUnitPrice, setTargetUnitPrice] = useState<number>(Math.round(product.price * 0.96));
   const [buyerNote, setBuyerNote] = useState<string>('');
@@ -362,6 +364,75 @@ export const NegotiationModal: React.FC<NegotiationModalProps> = ({
                 Done
               </Button>
             </div>
+          ) : activeOffer && (activeOffer.status === 'HUMAN_APPROVAL_REQUIRED' || activeOffer.status === 'WAITING_FOR_MERCHANT') ? (
+            /* Dedicated Success / Price Request Sent View */
+            <div className="p-4 sm:p-6 text-center space-y-5">
+              <div className="w-16 h-16 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-600 flex items-center justify-center mx-auto shadow-xs">
+                <CheckIcon size={32} />
+              </div>
+
+              <div className="space-y-1">
+                <h3 className="text-xl font-extrabold text-slate-900">✓ Price Request Sent</h3>
+                <p className="text-xs text-slate-500 font-mono">
+                  Offer Code: {activeOffer.offer_code}
+                </p>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-left text-xs space-y-2.5">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Product:</span>
+                  <span className="font-bold text-slate-900 truncate max-w-[200px]">{product.name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Quantity:</span>
+                  <span className="font-bold text-slate-900">{activeOffer.quantity} unit{activeOffer.quantity > 1 ? 's' : ''}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Original Total:</span>
+                  <span className="font-mono text-slate-500 line-through">₹{Number(activeOffer.list_total).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Customer Requested Price:</span>
+                  <span className="font-mono font-bold text-slate-900">₹{Number(activeOffer.requested_total).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                </div>
+                <div className="pt-2 border-t border-slate-200 flex justify-between items-center">
+                  <span className="text-slate-500">Current Status:</span>
+                  <span className="px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800 flex items-center gap-1.5">
+                    <span>🟠</span>
+                    <span>WAITING FOR MERCHANT</span>
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-indigo-50/80 border border-indigo-100 text-indigo-900 text-xs text-left flex items-start gap-2">
+                <span className="text-indigo-600 text-sm shrink-0">💬</span>
+                <p className="leading-relaxed">
+                  We&apos;ll notify you when the merchant responds. You can track this request and future discounts directly from your account.
+                </p>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-3 pt-2">
+                <Button
+                  onClick={() => {
+                    onClose();
+                    router.push('/price-requests');
+                  }}
+                  variant="primary"
+                  size="md"
+                  className="flex-1 font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm"
+                >
+                  View My Price Requests →
+                </Button>
+                <Button
+                  onClick={onClose}
+                  variant="outline"
+                  size="md"
+                  className="text-slate-600 border-slate-200"
+                >
+                  Continue Shopping
+                </Button>
+              </div>
+            </div>
           ) : activeOffer ? (
             /* Active Offer Lifecycle View */
             <div className="space-y-5">
@@ -378,8 +449,6 @@ export const NegotiationModal: React.FC<NegotiationModalProps> = ({
                         ? 'success'
                         : activeOffer.status === 'COUNTER_OFFERED'
                         ? 'warning'
-                        : activeOffer.status === 'HUMAN_APPROVAL_REQUIRED'
-                        ? 'purple'
                         : 'error'
                     }
                     size="sm"
@@ -421,16 +490,7 @@ export const NegotiationModal: React.FC<NegotiationModalProps> = ({
               </div>
 
               {/* Action Buttons based on status */}
-              {activeOffer.status === 'HUMAN_APPROVAL_REQUIRED' ? (
-                <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 font-medium space-y-2">
-                  <p>
-                    ⏳ <strong>Merchant Review in Progress:</strong> Your proposed price exceeds automatic thresholds and is waiting for merchant admin review.
-                  </p>
-                  <Button onClick={onClose} variant="outline" size="sm" className="w-full font-bold">
-                    Close &amp; Check Later
-                  </Button>
-                </div>
-              ) : activeOffer.status === 'REJECTED' || activeOffer.status === 'CUSTOMER_REJECTED' ? (
+              {activeOffer.status === 'REJECTED' || activeOffer.status === 'CUSTOMER_REJECTED' ? (
                 <div className="space-y-2">
                   <Button onClick={() => setActiveOffer(null)} variant="primary" size="md" className="w-full font-bold">
                     Make a Different Offer

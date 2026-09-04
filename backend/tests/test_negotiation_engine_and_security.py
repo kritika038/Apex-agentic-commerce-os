@@ -938,3 +938,249 @@ def test_security_30_unapproved_offer_cannot_be_checked_out(client, db, test_set
     assert checkout_resp.status_code in [400, 500]
     assert "accepted before checking out" in checkout_resp.text.lower()
 
+
+def test_security_31_my_price_requests_unauthenticated_returns_401(client):
+    """
+    Test 31: Unauthenticated request to /my-requests and /my-requests/badge returns 401.
+    """
+    resp1 = client.get("/api/v1/negotiation/my-requests")
+    assert resp1.status_code == 401
+
+    resp2 = client.get("/api/v1/negotiation/my-requests/badge")
+    assert resp2.status_code == 401
+
+
+def test_security_32_my_price_requests_user_isolation(client, db, test_setup):
+    """
+    Test 32: Strict user isolation — Customer A only sees Customer A's offers, Customer B only sees Customer B's offers.
+    """
+    from app.core.security import create_access_token
+    from app.database.models.user import User
+
+    # Create User A
+    user_a = db.query(User).filter(User.email == "buyer_a@apex.test").first()
+    if not user_a:
+        user_a = User(email="buyer_a@apex.test", full_name="Buyer A", hashed_password="pw", role="customer", is_active=True)
+        db.add(user_a)
+        db.commit()
+        db.refresh(user_a)
+
+    # Create User B
+    user_b = db.query(User).filter(User.email == "buyer_b@apex.test").first()
+    if not user_b:
+        user_b = User(email="buyer_b@apex.test", full_name="Buyer B", hashed_password="pw", role="customer", is_active=True)
+        db.add(user_b)
+        db.commit()
+        db.refresh(user_b)
+
+    token_a = create_access_token(subject=user_a.id, merchant_id=None, role="customer")
+    token_b = create_access_token(subject=user_b.id, merchant_id=None, role="customer")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    # Start negotiation for User A
+    client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 1, "requested_unit_price": 4900.00, "customer_id": user_a.email}
+    )
+
+    # Start negotiation for User B
+    client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 2, "requested_unit_price": 4850.00, "customer_id": user_b.email}
+    )
+
+    # Fetch User A's requests
+    res_a = client.get("/api/v1/negotiation/my-requests", headers=headers_a)
+    assert res_a.status_code == 200
+    offers_a = res_a.json()
+    assert len(offers_a) >= 1
+    assert all(o["customer_id"] == user_a.email for o in offers_a)
+
+    # Fetch User B's requests
+    res_b = client.get("/api/v1/negotiation/my-requests", headers=headers_b)
+    assert res_b.status_code == 200
+    offers_b = res_b.json()
+    assert len(offers_b) >= 1
+    assert all(o["customer_id"] == user_b.email for o in offers_b)
+
+    # Ensure none of User A's offers appear in User B's list
+    ids_a = {o["id"] for o in offers_a}
+    ids_b = {o["id"] for o in offers_b}
+    assert ids_a.isdisjoint(ids_b)
+
+
+def test_security_33_my_price_requests_badge_and_schema(client, db, test_setup):
+    """
+    Test 33: Actionable badge counter and rich response schema (product_name, product_image_url, category, is_actionable).
+    """
+    from app.core.security import create_access_token
+    from app.database.models.user import User
+
+    user = db.query(User).filter(User.email == "badge_tester@apex.test").first()
+    if not user:
+        user = User(email="badge_tester@apex.test", full_name="Badge Tester", hashed_password="pw", role="customer", is_active=True)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    token = create_access_token(subject=user.id, merchant_id=None, role="customer")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Start an auto-accepted offer (discount <= 3%)
+    res_start = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 1, "requested_unit_price": 4900.00, "customer_id": user.email}
+    )
+    assert res_start.status_code == 200
+    assert res_start.json()["status"] == NegotiationState.AUTO_ACCEPTED.value
+
+    # Check badge
+    badge_resp = client.get("/api/v1/negotiation/my-requests/badge", headers=headers)
+    assert badge_resp.status_code == 200
+    badge_data = badge_resp.json()
+    assert badge_data["actionable_count"] >= 1
+    assert badge_data["total_count"] >= 1
+
+    # Check schema fields in /my-requests
+    reqs_resp = client.get("/api/v1/negotiation/my-requests", headers=headers)
+    assert reqs_resp.status_code == 200
+    items = reqs_resp.json()
+    assert len(items) >= 1
+    item = items[0]
+    assert item["product_name"] == "Apex Pro Running Shoe"
+    assert item["category"] == "Footwear"
+    assert "is_actionable" in item
+    assert item["is_actionable"] is True
+
+
+def test_security_34_merchant_price_requests_role_and_tenant_isolation(client, db, test_setup):
+    """
+    Test 34: Merchant price requests endpoint security & tenant isolation:
+    - 401 unauthenticated
+    - 403 customer role (non-merchant_admin)
+    - Tenant isolation: Merchant Admin for Tenant 1 cannot view Tenant 2 requests.
+    """
+    from app.core.security import create_access_token
+    from app.database.models.user import User
+    from app.database.models.merchant import Merchant
+
+    # Ensure Merchant 2 exists
+    m2 = db.query(Merchant).filter(Merchant.id == "merch_tenant_2").first()
+    if not m2:
+        m2 = Merchant(id="merch_tenant_2", name="Tenant 2 Sports", domain="tenant2.local", is_active=True)
+        db.add(m2)
+        db.commit()
+
+    # Create Merchant Admin 1
+    admin_1 = db.query(User).filter(User.email == "admin_t1@apex.test").first()
+    if not admin_1:
+        admin_1 = User(email="admin_t1@apex.test", full_name="Admin T1", hashed_password="pw", role="merchant_admin", merchant_id="merch_test", is_active=True)
+        db.add(admin_1)
+        db.commit()
+        db.refresh(admin_1)
+
+    # Create Merchant Admin 2
+    admin_2 = db.query(User).filter(User.email == "admin_t2@apex.test").first()
+    if not admin_2:
+        admin_2 = User(email="admin_t2@apex.test", full_name="Admin T2", hashed_password="pw", role="merchant_admin", merchant_id="merch_tenant_2", is_active=True)
+        db.add(admin_2)
+        db.commit()
+        db.refresh(admin_2)
+
+    # Create normal customer
+    cust = db.query(User).filter(User.email == "customer_only@apex.test").first()
+    if not cust:
+        cust = User(email="customer_only@apex.test", full_name="Cust", hashed_password="pw", role="customer", is_active=True)
+        db.add(cust)
+        db.commit()
+        db.refresh(cust)
+
+    token_admin_1 = create_access_token(subject=admin_1.id, merchant_id="merch_test", role="merchant_admin")
+    token_admin_2 = create_access_token(subject=admin_2.id, merchant_id="merch_tenant_2", role="merchant_admin")
+    token_cust = create_access_token(subject=cust.id, merchant_id=None, role="customer")
+
+    # 1. Unauthenticated -> 401
+    resp_unauth = client.get("/api/v1/negotiation/merchant-requests")
+    assert resp_unauth.status_code == 401
+
+    # 2. Customer role -> 403 Forbidden
+    resp_cust = client.get("/api/v1/negotiation/merchant-requests", headers={"Authorization": f"Bearer {token_cust}"})
+    assert resp_cust.status_code == 403
+
+    # 3. Create request for Tenant 1
+    client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 1, "requested_unit_price": 4800.00, "customer_id": "t1_user@apex.test"}
+    )
+
+    # 4. Merchant Admin 1 sees Tenant 1 requests
+    resp_t1 = client.get("/api/v1/negotiation/merchant-requests", headers={"Authorization": f"Bearer {token_admin_1}"})
+    assert resp_t1.status_code == 200
+    offers_t1 = resp_t1.json()
+    assert len(offers_t1) >= 1
+    assert all(o["merchant_id"] == "merch_test" for o in offers_t1)
+
+    # 5. Merchant Admin 2 badge and list are isolated from Tenant 1
+    resp_t2 = client.get("/api/v1/negotiation/merchant-requests", headers={"Authorization": f"Bearer {token_admin_2}"})
+    assert resp_t2.status_code == 200
+    offers_t2 = resp_t2.json()
+    assert all(o["merchant_id"] == "merch_tenant_2" for o in offers_t2)
+
+
+def test_security_35_merchant_decision_lifecycle(client, db, test_setup):
+    """
+    Test 35: Complete merchant approval and counter-offer decision lifecycle.
+    """
+    from app.core.security import create_access_token
+    from app.database.models.user import User
+
+    admin = db.query(User).filter(User.email == "decision_admin@apex.test").first()
+    if not admin:
+        admin = User(email="decision_admin@apex.test", full_name="Decision Admin", hashed_password="pw", role="merchant_admin", merchant_id="merch_test", is_active=True)
+        db.add(admin)
+        db.commit()
+        db.refresh(admin)
+
+    token_admin = create_access_token(subject=admin.id, merchant_id="merch_test", role="merchant_admin")
+    admin_headers = {"Authorization": f"Bearer {token_admin}"}
+
+    # 1. Customer starts negotiation requiring human approval (4% discount on 5000 -> 4800)
+    res_start = client.post(
+        "/api/v1/negotiation/start?merchant_id=merch_test",
+        json={"product_id": "prod_test_shoe", "quantity": 2, "requested_unit_price": 4800.00, "customer_id": "cust_lifecycle@apex.test"}
+    )
+    assert res_start.status_code == 200
+    offer_id = res_start.json()["offer"]["id"]
+    assert res_start.json()["status"] == NegotiationState.HUMAN_APPROVAL_REQUIRED.value
+
+    # 2. Check merchant badge count
+    badge_resp = client.get("/api/v1/negotiation/merchant-requests/badge", headers=admin_headers)
+    assert badge_resp.status_code == 200
+    assert badge_resp.json()["pending_count"] >= 1
+
+    # 3. Merchant counters with unit price 4850
+    counter_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/merchant/counter",
+        headers=admin_headers,
+        json={
+            "merchant_id": "merch_test",
+            "counter_unit_price": 4850.00,
+            "counter_total": 9700.00,
+            "reason": "Special merchant counter for pair order."
+        }
+    )
+    assert counter_resp.status_code == 200
+    assert counter_resp.json()["status"] == NegotiationState.COUNTER_OFFERED.value
+    assert float(counter_resp.json()["final_total"]) == 9700.00
+
+    # 4. Customer accepts counter-offer
+    accept_resp = client.post(
+        f"/api/v1/negotiation/{offer_id}/accept",
+        json={"customer_id": "cust_lifecycle@apex.test", "reason": "Customer accepted counter offer."}
+    )
+    assert accept_resp.status_code == 200
+    assert accept_resp.json()["status"] == NegotiationState.CUSTOMER_ACCEPTED.value
+
+
+

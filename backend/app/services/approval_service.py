@@ -133,13 +133,33 @@ class ApprovalService:
         )
         db.add(auth)
 
-        # 5. Update PurchaseIntent status
+        # 5. Update PurchaseIntent status and linked NegotiatedOffer
         intent = db.query(PurchaseIntent).filter(PurchaseIntent.id == req.purchase_intent_id).first()
         trace_id = intent.trace_id if intent else (policy_eval.trace_id if policy_eval else f"trace_{req.id[:8]}")
         session_id = intent.session_id if intent else None
 
         if intent:
             intent.status = "VALIDATED"
+
+        from app.database.models.negotiated_offer import NegotiatedOffer
+        from app.negotiation.state_machine import NegotiationState
+
+        neg_offer = db.query(NegotiatedOffer).filter(
+            (NegotiatedOffer.merchant_approval_request_id == req.id) |
+            (NegotiatedOffer.negotiation_id == req.purchase_intent_id) |
+            (NegotiatedOffer.id == req.purchase_intent_id)
+        ).first()
+
+        if neg_offer and neg_offer.status not in [
+            NegotiationState.ORDER_CONFIRMED.value,
+            NegotiationState.CUSTOMER_REJECTED.value,
+            NegotiationState.MERCHANT_REJECTED.value,
+            NegotiationState.CANCELLED.value,
+        ]:
+            neg_offer.status = NegotiationState.MERCHANT_APPROVED.value
+            neg_offer.merchant_decision = "APPROVED"
+            neg_offer.merchant_decision_at = datetime.now(timezone.utc)
+            neg_offer.merchant_message = notes or "Approved by merchant operator in Human-in-the-Loop review."
 
         db.flush()
 

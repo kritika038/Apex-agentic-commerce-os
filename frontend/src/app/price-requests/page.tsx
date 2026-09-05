@@ -778,10 +778,33 @@ function PriceRequestCard({
     return Math.max(0, Math.floor((exp - now) / 1000));
   });
 
-  const isExpired = secondsRemaining <= 0 && offer.status !== 'ORDER_CONFIRMED';
+  const isApproved =
+    offer.status === 'MERCHANT_APPROVED' ||
+    offer.status === 'AUTO_ACCEPTED' ||
+    offer.status === 'CUSTOMER_OFFER_PRESENTED';
+  const isCounterOffer =
+    offer.status === 'COUNTER_OFFERED' || offer.status === 'MERCHANT_COUNTERED';
+  const isAcceptedOrPendingPayment =
+    offer.status === 'CUSTOMER_ACCEPTED' || offer.status === 'PAYMENT_PENDING';
+  const isConfirmed =
+    offer.status === 'ORDER_CONFIRMED' || offer.payment_status === 'CAPTURED';
+  const isPending =
+    offer.status === 'HUMAN_APPROVAL_REQUIRED' ||
+    offer.status === 'WAITING_FOR_MERCHANT' ||
+    offer.status === 'PENDING' ||
+    offer.status === 'NEGOTIATION_STARTED' ||
+    offer.status === 'OFFER_REQUESTED' ||
+    offer.status === 'MERCHANT_POLICY_EVALUATING';
+
+  // Approved offers do NOT expire due to TTL
+  const isExpired =
+    !isApproved &&
+    !isConfirmed &&
+    !isAcceptedOrPendingPayment &&
+    (offer.status === 'EXPIRED' || (Boolean(offer.expires_at) && secondsRemaining <= 0));
 
   useEffect(() => {
-    if (!offer.expires_at || offer.status === 'ORDER_CONFIRMED') return;
+    if (!offer.expires_at || isApproved || isConfirmed || isAcceptedOrPendingPayment) return;
     const timer = setInterval(() => {
       const exp = new Date(offer.expires_at).getTime();
       const now = new Date().getTime();
@@ -789,7 +812,7 @@ function PriceRequestCard({
       setSecondsRemaining(diff);
     }, 1000);
     return () => clearInterval(timer);
-  }, [offer.expires_at, offer.status]);
+  }, [offer.expires_at, offer.status, isApproved, isConfirmed, isAcceptedOrPendingPayment]);
 
   const formatCountdown = (secs: number) => {
     const mins = Math.floor(secs / 60);
@@ -799,7 +822,7 @@ function PriceRequestCard({
 
   // Status mapping
   const renderStatusBadge = () => {
-    if (offer.status === 'ORDER_CONFIRMED' || offer.payment_status === 'CAPTURED') {
+    if (isConfirmed) {
       return (
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
           <span>✓</span>
@@ -807,11 +830,27 @@ function PriceRequestCard({
         </span>
       );
     }
-    if (isExpired || offer.status === 'EXPIRED') {
+    if (isApproved) {
       return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600 border border-slate-300">
-          <span>⚪</span>
-          <span>OFFER EXPIRED</span>
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+          <span>🟢</span>
+          <span>MERCHANT APPROVED</span>
+        </span>
+      );
+    }
+    if (isAcceptedOrPendingPayment) {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-100 text-indigo-800 border border-indigo-300">
+          <span>💳</span>
+          <span>PAYMENT PENDING</span>
+        </span>
+      );
+    }
+    if (isCounterOffer && !isExpired) {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300 animate-pulse">
+          <span>🟡</span>
+          <span>COUNTER OFFER</span>
         </span>
       );
     }
@@ -823,35 +862,19 @@ function PriceRequestCard({
         </span>
       );
     }
-    if (offer.status === 'COUNTER_OFFERED' || offer.status === 'MERCHANT_COUNTERED') {
-      return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300 animate-pulse">
-          <span>🟡</span>
-          <span>COUNTER OFFER</span>
-        </span>
-      );
-    }
-    if (offer.status === 'MERCHANT_APPROVED' || offer.status === 'AUTO_ACCEPTED' || offer.status === 'CUSTOMER_OFFER_PRESENTED') {
-      return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-          <span>🟢</span>
-          <span>PRICE APPROVED</span>
-        </span>
-      );
-    }
-    if (offer.status === 'CUSTOMER_ACCEPTED' || offer.status === 'PAYMENT_PENDING') {
-      return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-100 text-indigo-800 border border-indigo-300">
-          <span>💳</span>
-          <span>PAYMENT PENDING</span>
-        </span>
-      );
-    }
-    if (offer.status === 'HUMAN_APPROVAL_REQUIRED' || offer.status === 'WAITING_FOR_MERCHANT' || offer.status === 'PENDING') {
+    if (isPending && !isExpired) {
       return (
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-900 border border-amber-300">
           <span>🟠</span>
           <span>WAITING FOR MERCHANT</span>
+        </span>
+      );
+    }
+    if (isExpired || offer.status === 'EXPIRED') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600 border border-slate-300">
+          <span>⚪</span>
+          <span>OFFER EXPIRED</span>
         </span>
       );
     }
@@ -861,17 +884,6 @@ function PriceRequestCard({
       </Badge>
     );
   };
-
-  const isCounterOffer =
-    offer.status === 'COUNTER_OFFERED' || offer.status === 'MERCHANT_COUNTERED';
-  const isApproved =
-    offer.status === 'MERCHANT_APPROVED' ||
-    offer.status === 'AUTO_ACCEPTED' ||
-    offer.status === 'CUSTOMER_OFFER_PRESENTED';
-  const isAcceptedOrPendingPayment =
-    offer.status === 'CUSTOMER_ACCEPTED' || offer.status === 'PAYMENT_PENDING';
-  const isConfirmed =
-    offer.status === 'ORDER_CONFIRMED' || offer.payment_status === 'CAPTURED';
 
   const requestedDiscountPct = offer.list_total > 0 && offer.requested_total > 0
     ? Math.max(0, ((offer.list_total - offer.requested_total) / offer.list_total) * 100)
@@ -927,10 +939,16 @@ function PriceRequestCard({
             <div className="text-xs text-slate-500 flex flex-wrap items-center gap-x-4 gap-y-1">
               <span>Qty: <strong className="text-slate-800">{offer.quantity} unit{offer.quantity > 1 ? 's' : ''}</strong></span>
               <span>Requested on: {new Date(offer.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span>
-              {offer.is_actionable && !isExpired && (
+              {offer.is_actionable && !isExpired && !isApproved && !isConfirmed && (
                 <span className="flex items-center gap-1 font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-md">
                   <ClockIcon size={12} />
                   <span>Expires in {formatCountdown(secondsRemaining)}</span>
+                </span>
+              )}
+              {isApproved && (
+                <span className="flex items-center gap-1 font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md">
+                  <span>✓</span>
+                  <span>Approved by merchant</span>
                 </span>
               )}
             </div>
@@ -1072,8 +1090,8 @@ function PriceRequestCard({
               </>
             )}
 
-            {/* 4. In Review */}
-            {(offer.status === 'HUMAN_APPROVAL_REQUIRED' || offer.status === 'WAITING_FOR_MERCHANT' || offer.status === 'PENDING') && (
+            {/* 4. In Review (Only when pending and not approved) */}
+            {isPending && !isApproved && !isExpired && (
               <>
                 <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-xl font-semibold flex items-center gap-1.5">
                   <ClockIcon size={12} />
@@ -1089,7 +1107,7 @@ function PriceRequestCard({
             )}
 
             {/* 5. Closed / Expired -> Shop Product */}
-            {(isExpired || offer.status === 'REJECTED' || offer.status === 'CUSTOMER_REJECTED' || offer.status === 'MERCHANT_REJECTED' || offer.status === 'EXPIRED') && (
+            {(isExpired || offer.status === 'REJECTED' || offer.status === 'CUSTOMER_REJECTED' || offer.status === 'MERCHANT_REJECTED' || offer.status === 'EXPIRED') && !isApproved && (
               <Link
                 href={`/shopping/${offer.product_id}?negotiated_offer_id=${offer.id}`}
                 className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors"

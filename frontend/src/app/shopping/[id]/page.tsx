@@ -341,9 +341,9 @@ export default function ProductDetailPage() {
       });
   }, [productId, negotiatedOfferId]);
 
-  // Live countdown timer for active offer
+  // Live countdown timer for active non-approved offer (e.g. counter offer)
   useEffect(() => {
-    if (!validatedOffer || validatedOffer.is_expired) return;
+    if (!validatedOffer || validatedOffer.is_expired || validatedOffer.is_approved) return;
     setSecondsRemaining(validatedOffer.seconds_remaining);
 
     const interval = setInterval(() => {
@@ -358,7 +358,7 @@ export default function ProductDetailPage() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [validatedOffer?.offer_id, validatedOffer?.expires_at, validatedOffer?.is_expired, validatedOffer?.seconds_remaining]);
+  }, [validatedOffer?.offer_id, validatedOffer?.expires_at, validatedOffer?.is_expired, validatedOffer?.is_approved, validatedOffer?.seconds_remaining]);
 
   // 1-Click Razorpay Checkout for Authoritative Negotiated Offer
   const handleCheckoutNegotiatedOffer = async () => {

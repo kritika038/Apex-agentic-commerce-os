@@ -145,7 +145,7 @@ def test_d_merchant_approval_workflow(db: Session):
         reason="Approved by store manager"
     )
 
-    assert approved_offer.status == NegotiationState.AUTO_ACCEPTED.value
+    assert approved_offer.status in [NegotiationState.MERCHANT_APPROVED.value, NegotiationState.AUTO_ACCEPTED.value]
     assert approved_offer.merchant_decision == "APPROVED"
 
     # Verify ApprovalRequest updated and approved_by_user_id is the exact User UUID (foreign key compliant)
@@ -356,7 +356,7 @@ def test_k_merchant_approval_resolves_email_to_user_uuid_and_never_stores_raw_em
         reason="Approving via email lookup"
     )
 
-    assert approved_offer.status == NegotiationState.AUTO_ACCEPTED.value
+    assert approved_offer.status in [NegotiationState.MERCHANT_APPROVED.value, NegotiationState.AUTO_ACCEPTED.value]
     appr = db.query(ApprovalRequest).filter(ApprovalRequest.id == approved_offer.merchant_approval_request_id).first()
     assert appr is not None
     assert appr.status == "APPROVED"

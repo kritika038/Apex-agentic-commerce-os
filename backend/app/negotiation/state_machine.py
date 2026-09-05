@@ -80,18 +80,23 @@ VALID_TRANSITIONS: Dict[NegotiationState, Set[NegotiationState]] = {
     NegotiationState.AUTO_ACCEPTED: {
         NegotiationState.CUSTOMER_OFFER_PRESENTED,
         NegotiationState.CUSTOMER_ACCEPTED,
-        NegotiationState.EXPIRED,
+        NegotiationState.PAYMENT_PENDING,
+        NegotiationState.ORDER_CONFIRMED,
         NegotiationState.CANCELLED,
     },
     NegotiationState.COUNTER_OFFERED: {
         NegotiationState.CUSTOMER_OFFER_PRESENTED,
         NegotiationState.CUSTOMER_ACCEPTED,
+        NegotiationState.MERCHANT_APPROVED,
+        NegotiationState.MERCHANT_COUNTERED,
+        NegotiationState.MERCHANT_REJECTED,
         NegotiationState.CUSTOMER_REJECTED,
         NegotiationState.EXPIRED,
         NegotiationState.CANCELLED,
     },
     NegotiationState.HUMAN_APPROVAL_REQUIRED: {
         NegotiationState.MERCHANT_APPROVED,
+        NegotiationState.AUTO_ACCEPTED,
         NegotiationState.MERCHANT_COUNTERED,
         NegotiationState.MERCHANT_REJECTED,
         NegotiationState.EXPIRED,
@@ -100,7 +105,8 @@ VALID_TRANSITIONS: Dict[NegotiationState, Set[NegotiationState]] = {
     NegotiationState.MERCHANT_APPROVED: {
         NegotiationState.CUSTOMER_OFFER_PRESENTED,
         NegotiationState.CUSTOMER_ACCEPTED,
-        NegotiationState.EXPIRED,
+        NegotiationState.PAYMENT_PENDING,
+        NegotiationState.ORDER_CONFIRMED,
         NegotiationState.CANCELLED,
     },
     NegotiationState.MERCHANT_COUNTERED: {
@@ -119,20 +125,19 @@ VALID_TRANSITIONS: Dict[NegotiationState, Set[NegotiationState]] = {
     NegotiationState.CUSTOMER_ACCEPTED: {
         NegotiationState.GOVERNANCE_EVALUATED,
         NegotiationState.PAYMENT_PENDING,
-        NegotiationState.EXPIRED,
+        NegotiationState.ORDER_CONFIRMED,
         NegotiationState.CANCELLED,
     },
     NegotiationState.GOVERNANCE_EVALUATED: {
         NegotiationState.PAYMENT_PENDING,
+        NegotiationState.ORDER_CONFIRMED,
         NegotiationState.REJECTED,
-        NegotiationState.EXPIRED,
         NegotiationState.CANCELLED,
     },
     NegotiationState.PAYMENT_PENDING: {
         NegotiationState.PAYMENT_VERIFIED,
         NegotiationState.ORDER_CONFIRMED,
         NegotiationState.REJECTED,
-        NegotiationState.EXPIRED,
         NegotiationState.CANCELLED,
     },
     NegotiationState.PAYMENT_VERIFIED: {
@@ -141,9 +146,9 @@ VALID_TRANSITIONS: Dict[NegotiationState, Set[NegotiationState]] = {
     },
     # Terminal states have no outgoing transitions
     NegotiationState.ORDER_CONFIRMED: set(),
+    NegotiationState.REJECTED: set(),
     NegotiationState.CUSTOMER_REJECTED: set(),
     NegotiationState.MERCHANT_REJECTED: set(),
-    NegotiationState.REJECTED: set(),
     NegotiationState.EXPIRED: set(),
     NegotiationState.CANCELLED: set(),
 }
@@ -175,8 +180,25 @@ class NegotiationStateMachine:
         except ValueError as e:
             raise StateTransitionError(f"Invalid state identifier: {e}")
 
-        # Any active state can transition to EXPIRED or CANCELLED
-        if to_enum in {NegotiationState.EXPIRED, NegotiationState.CANCELLED} and from_enum not in TERMINAL_STATES:
+        # Invariant: Approved negotiated offers MUST NOT transition to EXPIRED due to TTL
+        if to_enum == NegotiationState.EXPIRED:
+            if from_enum in {
+                NegotiationState.MERCHANT_APPROVED,
+                NegotiationState.CUSTOMER_ACCEPTED,
+                NegotiationState.GOVERNANCE_EVALUATED,
+                NegotiationState.PAYMENT_PENDING,
+                NegotiationState.PAYMENT_VERIFIED,
+                NegotiationState.ORDER_CONFIRMED,
+            } or from_enum in TERMINAL_STATES:
+                raise StateTransitionError(
+                    f"Illegal negotiation transition from {from_state} to {to_state}. "
+                    f"Approved negotiated offers are persistent and cannot transition to EXPIRED."
+                )
+            if from_enum not in TERMINAL_STATES:
+                return True
+
+        # Any active non-terminal state can be CANCELLED
+        if to_enum == NegotiationState.CANCELLED and from_enum not in TERMINAL_STATES:
             return True
 
         allowed = VALID_TRANSITIONS.get(from_enum, set())

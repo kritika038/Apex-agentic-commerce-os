@@ -161,8 +161,82 @@ def get_my_price_requests(
         identifiers.append(current_user.email.lower())
 
     query = db.query(NegotiatedOffer).filter(NegotiatedOffer.buyer_user_id.in_(identifiers))
+    now_utc = datetime.now(timezone.utc)
+    now_naive = now_utc.replace(tzinfo=None)
+
     if status_filter:
-        query = query.filter(NegotiatedOffer.status == status_filter)
+        s_upper = status_filter.upper()
+        if s_upper in ["PENDING", "ACTIONABLE"]:
+            query = query.filter(
+                (
+                    NegotiatedOffer.status.in_([
+                        "HUMAN_APPROVAL_REQUIRED",
+                        "WAITING_FOR_MERCHANT",
+                        "OFFER_REQUESTED",
+                        "NEGOTIATION_STARTED",
+                        "MERCHANT_POLICY_EVALUATING",
+                        "PENDING",
+                        "COUNTER_OFFERED",
+                        "MERCHANT_COUNTERED",
+                    ]) &
+                    ((NegotiatedOffer.expires_at == None) | (NegotiatedOffer.expires_at > now_naive))
+                ) |
+                NegotiatedOffer.status.in_([
+                    "MERCHANT_APPROVED",
+                    "AUTO_ACCEPTED",
+                    "CUSTOMER_OFFER_PRESENTED",
+                    "CUSTOMER_ACCEPTED",
+                    "PAYMENT_PENDING"
+                ])
+            )
+        elif s_upper == "APPROVED":
+            query = query.filter(
+                NegotiatedOffer.status.in_([
+                    "MERCHANT_APPROVED",
+                    "AUTO_ACCEPTED",
+                    "CUSTOMER_OFFER_PRESENTED",
+                ])
+            )
+        elif s_upper in ["COUNTERED", "COUNTER_OFFERED"]:
+            query = query.filter(
+                NegotiatedOffer.status.in_([
+                    "COUNTER_OFFERED",
+                    "MERCHANT_COUNTERED",
+                ])
+            )
+        elif s_upper in ["DECLINED", "REJECTED"]:
+            query = query.filter(
+                NegotiatedOffer.status.in_([
+                    "REJECTED",
+                    "MERCHANT_REJECTED",
+                    "CUSTOMER_REJECTED",
+                ])
+            )
+        elif s_upper in ["CONFIRMED", "ORDER_CONFIRMED"]:
+            query = query.filter(
+                (NegotiatedOffer.status == "ORDER_CONFIRMED") | (NegotiatedOffer.payment_order_id != None)
+            )
+        elif s_upper == "EXPIRED":
+            query = query.filter(
+                (NegotiatedOffer.status == "EXPIRED") |
+                (
+                    (NegotiatedOffer.expires_at <= now_naive) &
+                    ~NegotiatedOffer.status.in_([
+                        "MERCHANT_APPROVED",
+                        "AUTO_ACCEPTED",
+                        "CUSTOMER_ACCEPTED",
+                        "PAYMENT_PENDING",
+                        "PAYMENT_VERIFIED",
+                        "ORDER_CONFIRMED",
+                        "CANCELLED",
+                        "REJECTED",
+                        "MERCHANT_REJECTED",
+                        "CUSTOMER_REJECTED"
+                    ])
+                )
+            )
+        elif s_upper != "ALL":
+            query = query.filter(NegotiatedOffer.status == status_filter)
 
     offers = query.order_by(NegotiatedOffer.created_at.desc()).all()
     return offers
@@ -252,7 +326,22 @@ def get_merchant_price_requests(
             )
         elif s_upper == "EXPIRED":
             query = query.filter(
-                (NegotiatedOffer.status == "EXPIRED") | (NegotiatedOffer.expires_at <= now_naive)
+                (NegotiatedOffer.status == "EXPIRED") |
+                (
+                    (NegotiatedOffer.expires_at <= now_naive) &
+                    ~NegotiatedOffer.status.in_([
+                        "MERCHANT_APPROVED",
+                        "AUTO_ACCEPTED",
+                        "CUSTOMER_ACCEPTED",
+                        "PAYMENT_PENDING",
+                        "PAYMENT_VERIFIED",
+                        "ORDER_CONFIRMED",
+                        "CANCELLED",
+                        "REJECTED",
+                        "MERCHANT_REJECTED",
+                        "CUSTOMER_REJECTED"
+                    ])
+                )
             )
         elif s_upper != "ALL":
             query = query.filter(NegotiatedOffer.status == status_filter)
@@ -606,9 +695,12 @@ def validate_offer_for_pdp(
                 detail="Access denied: You do not have permission to view this price request."
             )
 
-    # 3. Expiration Check
     now_utc = datetime.now(timezone.utc)
-    if offer.expires_at:
+    is_persistent_approved = (offer.status == NegotiationState.MERCHANT_APPROVED.value) or (offer.merchant_decision == "APPROVED")
+    if is_persistent_approved:
+        is_expired = False
+        exp = None
+    elif offer.expires_at:
         exp = offer.expires_at if offer.expires_at.tzinfo else offer.expires_at.replace(tzinfo=timezone.utc)
         is_expired = (exp < now_utc) or (offer.status == NegotiationState.EXPIRED.value)
     else:
@@ -617,8 +709,6 @@ def validate_offer_for_pdp(
 
     if is_expired and offer.status in [
         NegotiationState.COUNTER_OFFERED.value,
-        NegotiationState.AUTO_ACCEPTED.value,
-        NegotiationState.MERCHANT_APPROVED.value,
         NegotiationState.CUSTOMER_OFFER_PRESENTED.value,
         NegotiationState.HUMAN_APPROVAL_REQUIRED.value,
     ]:
@@ -632,8 +722,8 @@ def validate_offer_for_pdp(
 
     # 5. Determine State Flags
     is_counter = (offer.status in [NegotiationState.COUNTER_OFFERED.value, NegotiationState.MERCHANT_COUNTERED.value]) and not is_expired
-    is_approved = (offer.status in [NegotiationState.AUTO_ACCEPTED.value, NegotiationState.MERCHANT_APPROVED.value]) and not is_expired
-    is_accepted = (offer.status == NegotiationState.CUSTOMER_ACCEPTED.value) and not is_expired
+    is_approved = offer.status in [NegotiationState.AUTO_ACCEPTED.value, NegotiationState.MERCHANT_APPROVED.value]
+    is_accepted = offer.status == NegotiationState.CUSTOMER_ACCEPTED.value
     is_pending = (offer.status in [
         NegotiationState.HUMAN_APPROVAL_REQUIRED.value,
         NegotiationState.OFFER_REQUESTED.value,
@@ -655,7 +745,7 @@ def validate_offer_for_pdp(
         and in_stock
     )
 
-    seconds_remaining = max(0, int((exp - now_utc).total_seconds())) if not is_expired else 0
+    seconds_remaining = max(0, int((exp - now_utc).total_seconds())) if (exp and not is_expired and not is_persistent_approved) else 0
 
     return {
         "offer_id": offer.id,

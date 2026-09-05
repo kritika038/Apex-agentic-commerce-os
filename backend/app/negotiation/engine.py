@@ -640,11 +640,14 @@ class NegotiationEngine:
             raise ValueError(f"Customer mismatch: Offer belongs to {offer.buyer_user_id}.")
 
         now_utc = datetime.now(timezone.utc)
-        # Expiry check
-        if offer.expires_at.replace(tzinfo=timezone.utc) < now_utc:
-            offer.status = NegotiationState.EXPIRED.value
-            db.commit()
-            raise ValueError("Offer has expired and cannot be accepted.")
+        # Expiry check: merchant approved offers are persistent and DO NOT expire due to TTL
+        is_persistent_approved = (offer.status == NegotiationState.MERCHANT_APPROVED.value) or (offer.merchant_decision == "APPROVED")
+        if not is_persistent_approved and offer.expires_at:
+            exp = offer.expires_at if offer.expires_at.tzinfo else offer.expires_at.replace(tzinfo=timezone.utc)
+            if exp < now_utc or offer.status == NegotiationState.EXPIRED.value:
+                offer.status = NegotiationState.EXPIRED.value
+                db.commit()
+                raise ValueError("Offer has expired and cannot be accepted.")
 
         if offer.status == NegotiationState.CUSTOMER_ACCEPTED.value:
             return offer  # Idempotent replay
@@ -808,8 +811,10 @@ class NegotiationEngine:
             if offer.merchant_approval_request_id:
                 raise ValueError(f"Approver user record not found in system for user '{admin_user_id}'.")
 
-        # When merchant approves, offer becomes AUTO_ACCEPTED / ready for customer
-        offer.status = NegotiationState.AUTO_ACCEPTED.value
+        # When merchant approves, offer transitions to MERCHANT_APPROVED and becomes persistent
+        NegotiationStateMachine.validate_transition(offer.status, NegotiationState.MERCHANT_APPROVED.value)
+
+        offer.status = NegotiationState.MERCHANT_APPROVED.value
         offer.merchant_decision = "APPROVED"
         offer.merchant_decision_at = now_utc
         offer.merchant_message = reason or "Your request was approved by the merchant. You may now accept and proceed to payment."
@@ -835,7 +840,7 @@ class NegotiationEngine:
             status="SUCCESS",
             resource_type="NEGOTIATED_OFFER",
             resource_id=offer.id,
-            new_state=NegotiationState.AUTO_ACCEPTED.value,
+            new_state=NegotiationState.MERCHANT_APPROVED.value,
             metadata_json={"final_total": str(offer.final_total)}
         )
         return offer
@@ -1084,10 +1089,14 @@ class NegotiationEngine:
             raise ValueError(f"Customer mismatch: Offer belongs to {offer.buyer_user_id}.")
 
         now_utc = datetime.now(timezone.utc)
-        if offer.expires_at.replace(tzinfo=timezone.utc) < now_utc:
-            offer.status = NegotiationState.EXPIRED.value
-            db.commit()
-            raise ValueError("Offer has expired and cannot be paid.")
+        # Expiry check: merchant approved offers are persistent and DO NOT expire due to TTL
+        is_persistent_approved = (offer.status == NegotiationState.MERCHANT_APPROVED.value) or (offer.merchant_decision == "APPROVED")
+        if not is_persistent_approved and offer.expires_at:
+            exp = offer.expires_at if offer.expires_at.tzinfo else offer.expires_at.replace(tzinfo=timezone.utc)
+            if exp < now_utc or offer.status == NegotiationState.EXPIRED.value:
+                offer.status = NegotiationState.EXPIRED.value
+                db.commit()
+                raise ValueError("Offer has expired and cannot be paid.")
 
         is_razorpay_configured = bool(
             settings.RAZORPAY_KEY_ID
@@ -1111,7 +1120,12 @@ class NegotiationEngine:
                 "status": "payment_ready"
             }
 
-        if offer.status not in [NegotiationState.CUSTOMER_ACCEPTED.value, NegotiationState.PAYMENT_PENDING.value, NegotiationState.AUTO_ACCEPTED.value]:
+        if offer.status not in [
+            NegotiationState.CUSTOMER_ACCEPTED.value,
+            NegotiationState.PAYMENT_PENDING.value,
+            NegotiationState.AUTO_ACCEPTED.value,
+            NegotiationState.MERCHANT_APPROVED.value,
+        ]:
             raise ValueError(f"Offer is in '{offer.status}' state. Offer must be accepted before checking out.")
 
         # Price Tampering Prevention: ignore client_amount or assert match
@@ -1119,7 +1133,7 @@ class NegotiationEngine:
             if Decimal(str(client_amount)).quantize(Decimal("0.01")) != offer.final_total:
                 raise ValueError(f"Price mismatch: client amount ₹{client_amount} does not match authoritative offer price ₹{offer.final_total}.")
 
-        # Check stock
+        # Check stock without modifying or expiring the persistent offer
         product = db.query(Product).filter(Product.id == offer.product_id).first()
         if not product:
             raise ValueError("Product not found.")
@@ -1127,13 +1141,19 @@ class NegotiationEngine:
         if stock_qty < offer.quantity:
             raise ValueError(f"Product is out of stock. Available: {stock_qty}, Requested: {offer.quantity}.")
 
-        # 1. Create Transaction Authorization if not created yet
+        # 1. Ensure active Transaction Authorization window for payment transaction
+        now_dt = now_utc.replace(tzinfo=None)
         auth = db.query(TransactionAuthorization).filter(
             TransactionAuthorization.merchant_id == merchant_id,
             TransactionAuthorization.purchase_intent_id == offer.negotiation_id
         ).first()
 
-        if not auth:
+        if auth and (auth.status == "EXPIRED" or (auth.expires_at and now_dt > auth.expires_at)):
+            auth.status = "AUTHORIZED"
+            auth.authorized_at = now_dt
+            auth.expires_at = now_dt + timedelta(minutes=15)
+            db.flush()
+        elif not auth:
             now_dt = now_utc.replace(tzinfo=None)
             eval_id = offer.governance_evaluation_id
             if not eval_id or not db.query(PolicyEvaluation).filter(PolicyEvaluation.id == eval_id).first():

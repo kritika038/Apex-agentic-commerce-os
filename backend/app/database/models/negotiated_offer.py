@@ -91,7 +91,9 @@ class NegotiatedOffer(TimeStampedBase):
     @property
     def is_actionable(self) -> bool:
         now_utc = datetime.now(timezone.utc)
-        if self.expires_at:
+        if self.status == "MERCHANT_APPROVED" or self.merchant_decision == "APPROVED":
+            is_not_expired = True
+        elif self.expires_at:
             exp = self.expires_at if self.expires_at.tzinfo else self.expires_at.replace(tzinfo=timezone.utc)
             is_not_expired = exp > now_utc
         else:
@@ -104,7 +106,7 @@ class NegotiatedOffer(TimeStampedBase):
             "CUSTOMER_OFFER_PRESENTED",
             "CUSTOMER_ACCEPTED",
             "PAYMENT_PENDING"
-        ] and self.status != "ORDER_CONFIRMED"
+        ] and self.status not in ["ORDER_CONFIRMED", "EXPIRED", "REJECTED", "MERCHANT_REJECTED", "CUSTOMER_REJECTED", "CANCELLED"]
 
     @property
     def list_unit_price(self) -> Decimal:

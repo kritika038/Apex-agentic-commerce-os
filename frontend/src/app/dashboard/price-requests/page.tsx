@@ -572,9 +572,18 @@ export default function MerchantPriceRequestsPage() {
         {!loading && !error && filteredOffers.length > 0 && (
           <div className="space-y-4">
             {filteredOffers.map((offer) => {
+              const isApproved =
+                offer.status === 'MERCHANT_APPROVED' ||
+                offer.status === 'AUTO_ACCEPTED' ||
+                offer.status === 'CUSTOMER_OFFER_PRESENTED';
+              const isConfirmed =
+                offer.status === 'ORDER_CONFIRMED' || offer.payment_status === 'CAPTURED';
               const isOfferExpired =
-                offer.status === 'EXPIRED' ||
-                (offer.expires_at ? new Date(offer.expires_at).getTime() < Date.now() : false);
+                !isApproved &&
+                !isConfirmed &&
+                offer.status !== 'CUSTOMER_ACCEPTED' &&
+                (offer.status === 'EXPIRED' ||
+                  (offer.expires_at ? new Date(offer.expires_at).getTime() < Date.now() : false));
 
               const isPending =
                 !isOfferExpired &&

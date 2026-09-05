@@ -80,3 +80,38 @@ The **Agentic Commerce OS** is engineered as a 5-tier architecture separating co
 - **Database:** SQLite (local / fast deterministic tests) / PostgreSQL (production multi-tenant concurrency).
 - **Payment Providers:** Razorpay Test Mode API (`RazorpayProvider`) + Deterministic Local Simulator (`MockPaymentProvider`).
 - **Frontend Console:** Next.js 14 App Router, TypeScript, TailwindCSS, Lucide Icons, Glassmorphic UI theme.
+
+---
+
+## 4. Agentic Price Requests & Counter-Offer Negotiation Lifecycle
+
+- **Customer Direct Price Requests (`/shopping/{id}`):** Customer can propose a requested price for any catalog product.
+- **Hierarchical Governance Routing:**
+  - Automated Acceptance (within safe margin thresholds) $\rightarrow$ `APPROVED`.
+  - Commercial Escalations (discounts exceeding auto-limits but within review boundaries) $\rightarrow$ `HUMAN_APPROVAL_REQUIRED` in Merchant Inbox.
+  - Hard Policy Violations (exceeding maximum discount ceilings or absolute floor prices) $\rightarrow$ `DECLINED`.
+- **Merchant Inbox Management (`/dashboard/price-requests`):**
+  - Priority sorting: Active counter-offers $\rightarrow$ Pending actionable items $\rightarrow$ Terminal requests.
+  - State machine safety: Enforces pre-transition expiration checks (`EXPIRED`), preventing stale modifications.
+- **Secure 1-Click Checkout Transition:**
+  - Verified `NegotiatedOffer` context transferred via `negotiated_offer_id` query parameter to the product PDP (`/shopping/{product_id}?negotiated_offer_id={offer_id}`).
+  - Server-authoritative validation ensures immutable pricing, live stock check, and direct Razorpay checkout execution.
+
+---
+
+## 5. Grounded AI Shopping Assistant & Multi-Turn Context
+
+- **Catalog Grounding:**
+  - Strict 100% server-authoritative retrieval with zero hallucination.
+  - Multi-intent routing (`PRODUCT_INQUIRY`, `WHY_GOOD_FOR_USE_CASE`, `TRAIL_VS_ROAD`, `PRICE`, `SIZES`, `COLORS`, `STOCK`, `DISCOUNT_NEGOTIATE`, `GENERAL`).
+  - Multilingual support: English, Hindi, and Hinglish.
+  - Multi-turn conversational memory preserving active category, candidate selections, and purchase intent.
+
+---
+
+## 6. Smart Bundles & Frequently Bought Together
+
+- **Affinity Mining:** Deterministic co-purchase mining from captured orders with cross-category complementary merchandising fallbacks.
+- **Authoritative Bundle Totals:** Pre-calculated server-side ($P_{\text{main}} + P_{\text{target}}$) with strict numeric validation preventing NaN or missing pricing.
+- **Differentiated Grounded Evidence:** Category- and product-specific rationale for every complementary pairing.
+

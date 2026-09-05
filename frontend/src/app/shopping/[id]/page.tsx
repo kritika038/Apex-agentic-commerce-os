@@ -116,10 +116,12 @@ interface SmartBundle {
   target_product_id: string;
   target_product_name: string;
   target_price: number;
+  bundle_price: number;
   confidence: number;
   evidence: string;
-  bundle_price: number;
   savings: number;
+  image_url?: string;
+  in_stock?: boolean;
 }
 
 interface FitRecommendation {
@@ -246,8 +248,47 @@ export default function ProductDetailPage() {
       }
 
       // Fetch smart bundles
-      apiClient.get(`/personalization/products/${productId}/bundles`)
-        .then((bRes) => setBundles(bRes.data || []))
+      apiClient
+        .get(`/personalization/products/${productId}/bundles`)
+        .then((bRes) => {
+          const rawList = Array.isArray(bRes.data) ? bRes.data : [];
+          const mainPrice = Number(productData?.price);
+          const validBundles: SmartBundle[] = rawList
+            .filter((b: Record<string, unknown>) => {
+              const tPrice = Number(b.target_price ?? b.price);
+              const pId = (b.target_product_id ?? b.product_id) as string;
+              const pName = (b.target_product_name ?? b.name) as string;
+              return Boolean(
+                pId &&
+                pName &&
+                !Number.isNaN(tPrice) &&
+                Number.isFinite(tPrice) &&
+                tPrice > 0 &&
+                !Number.isNaN(mainPrice) &&
+                Number.isFinite(mainPrice) &&
+                mainPrice > 0
+              );
+            })
+            .map((b: Record<string, unknown>) => {
+              const tPrice = Number(b.target_price ?? b.price);
+              const calculatedBundlePrice = Number(b.bundle_price ?? (mainPrice + tPrice));
+              return {
+                target_product_id: String(b.target_product_id || b.product_id),
+                target_product_name: String(b.target_product_name || b.name),
+                target_price: tPrice,
+                bundle_price:
+                  !Number.isNaN(calculatedBundlePrice) && Number.isFinite(calculatedBundlePrice) && calculatedBundlePrice > 0
+                    ? calculatedBundlePrice
+                    : mainPrice + tPrice,
+                confidence: Number(b.confidence || 0.85),
+                evidence: String(b.evidence || `Recommended pairing with ${productData?.name || 'this product'}`),
+                savings: Number(b.savings || 0),
+                image_url: b.image_url ? String(b.image_url) : undefined,
+                in_stock: b.in_stock !== false,
+              };
+            });
+          setBundles(validBundles);
+        })
         .catch(() => setBundles([]));
 
       // Fetch fit recommendation
@@ -1092,36 +1133,54 @@ export default function ProductDetailPage() {
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {bundles.map((b, idx) => (
-                    <div
-                      key={b.target_product_id}
-                      className="p-4 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col justify-between gap-3 hover:border-indigo-300 transition-all"
-                    >
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <span className="font-bold text-xs text-slate-900">{b.target_product_name}</span>
-                          <span className="text-[11px] font-extrabold text-slate-900 font-mono">
-                            +₹{Number(b.target_price).toLocaleString('en-IN')}
-                          </span>
-                        </div>
-                        <p className="text-xs text-slate-600 leading-snug">{b.evidence}</p>
-                      </div>
+                  {bundles.map((b, idx) => {
+                    const targetPriceNum = Number(b.target_price);
+                    const bundlePriceNum = Number(b.bundle_price);
+                    if (
+                      Number.isNaN(targetPriceNum) ||
+                      !Number.isFinite(targetPriceNum) ||
+                      targetPriceNum <= 0 ||
+                      Number.isNaN(bundlePriceNum) ||
+                      !Number.isFinite(bundlePriceNum) ||
+                      bundlePriceNum <= 0
+                    ) {
+                      return null;
+                    }
 
-                      <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between">
-                        <span className="text-xs text-emerald-700 font-semibold">
-                          Bundle Total: <strong className="font-mono">₹{Number(b.bundle_price).toLocaleString('en-IN')}</strong>
-                        </span>
-                        <Button
-                          onClick={() => handleAddBundle(b, idx)}
-                          isLoading={addingBundleIndex === idx}
-                          variant="primary"
-                          size="xs"
-                        >
-                          Add Both to Cart
-                        </Button>
+                    const targetPriceFormatted = Math.round(targetPriceNum).toLocaleString('en-IN');
+                    const bundlePriceFormatted = Math.round(bundlePriceNum).toLocaleString('en-IN');
+
+                    return (
+                      <div
+                        key={b.target_product_id || `bundle-${idx}`}
+                        className="p-4 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col justify-between gap-3 hover:border-indigo-300 transition-all"
+                      >
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-xs text-slate-900">{b.target_product_name}</span>
+                            <span className="text-[11px] font-extrabold text-slate-900 font-mono">
+                              +₹{targetPriceFormatted}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-600 leading-snug">{b.evidence}</p>
+                        </div>
+
+                        <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between">
+                          <span className="text-xs text-emerald-700 font-semibold">
+                            Bundle Total: <strong className="font-mono">₹{bundlePriceFormatted}</strong>
+                          </span>
+                          <Button
+                            onClick={() => handleAddBundle(b, idx)}
+                            isLoading={addingBundleIndex === idx}
+                            variant="primary"
+                            size="xs"
+                          >
+                            Add Both to Cart
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}

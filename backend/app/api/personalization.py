@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from app.database.session import get_db
 from app.database.models.merchant import Merchant
+from app.database.models.product import Product
 from app.database.models.user import User
 from app.auth.deps import get_optional_current_user
 from app.services.personalization_service import PersonalizationService
@@ -75,9 +76,25 @@ def get_product_bundles(
 ):
     """
     Returns frequently bought together smart bundles for a given product.
+    Guarantees server-authoritative valid numeric pricing and complete fields.
     """
     m = db.query(Merchant).first()
     target_merchant_id = merchant_id or (m.id if m else "")
+
+    main_product = db.query(Product).filter(
+        Product.id == id,
+        Product.is_active == True
+    ).first()
+
+    if not main_product or not main_product.price:
+        return []
+
+    try:
+        main_price = float(main_product.price)
+        if main_price <= 0:
+            return []
+    except (ValueError, TypeError):
+        return []
 
     bundles = ProductAffinityService.get_frequently_bought_together(
         db=db,
@@ -86,20 +103,42 @@ def get_product_bundles(
         limit=3
     )
 
-    return [
-        {
-            "product_id": str(b["product"].id),
-            "name": b["product"].name,
-            "category": b["product"].category,
-            "price": float(b["product"].price),
-            "image_url": (b["product"].attributes or {}).get("image_url"),
-            "confidence": b["confidence"],
-            "support": b["support"],
-            "co_purchase_count": b["co_purchase_count"],
-            "evidence": b["evidence"]
-        }
-        for b in bundles
-    ]
+    results = []
+    for b in bundles:
+        p = b.get("product")
+        if not p or not p.is_active:
+            continue
+        try:
+            target_price = float(p.price)
+            if target_price <= 0:
+                continue
+        except (ValueError, TypeError):
+            continue
+
+        p_id = str(p.id)
+        bundle_price = round(main_price + target_price, 2)
+        stock = p.inventory.stock_quantity if p.inventory else 10
+
+        results.append({
+            "target_product_id": p_id,
+            "target_product_name": p.name,
+            "target_price": target_price,
+            "product_id": p_id,
+            "name": p.name,
+            "category": p.category,
+            "price": target_price,
+            "bundle_price": bundle_price,
+            "savings": 0.0,
+            "image_url": p.image_url or ((p.attributes or {}).get("image_url") if isinstance(p.attributes, dict) else None),
+            "confidence": float(b.get("confidence", 0.85)),
+            "support": float(b.get("support", 0.05)),
+            "co_purchase_count": int(b.get("co_purchase_count", 0)),
+            "evidence": b.get("evidence", f"Complementary {p.category} match for {main_product.name}"),
+            "in_stock": stock > 0,
+            "stock_quantity": stock
+        })
+
+    return results
 
 @router.get("/products/{id}/fit-recommendation")
 def get_product_fit_recommendation(

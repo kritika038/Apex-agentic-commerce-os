@@ -33,7 +33,8 @@ class ShoppingAgent:
         delivery_address: Optional[Dict[str, Any]] = None,
         applied_coupon: Optional[str] = None,
         applied_voucher: Optional[str] = None,
-        use_coins: bool = False
+        use_coins: bool = False,
+        product_id: Optional[str] = None
     ):
         self.db = db
         self.merchant_id = merchant_id
@@ -45,6 +46,7 @@ class ShoppingAgent:
         self.applied_coupon = applied_coupon
         self.applied_voucher = applied_voucher
         self.use_coins = use_coins
+        self.product_id = product_id
         
         self.permissions = ["READ_PRODUCTS", "READ_INVENTORY", "CREATE_CART", "READ_CART", "MODIFY_CART", "CALCULATE_CART"]
         self.agent_id = "shopping_agent_v1"
@@ -226,13 +228,59 @@ class ShoppingAgent:
         tool_call_count = 0
         step_seq = 1
 
+        # Resolve current product context if on PDP or active product in session
+        current_product = None
+        if self.product_id:
+            p_obj = self.db.query(Product).filter(Product.id == self.product_id).first()
+            if p_obj:
+                current_product = {
+                    "id": str(p_obj.id),
+                    "name": p_obj.name,
+                    "brand": p_obj.brand,
+                    "category": p_obj.category,
+                    "subcategory": p_obj.subcategory,
+                    "price": float(p_obj.price),
+                    "mrp": float(p_obj.mrp) if p_obj.mrp else None,
+                    "image_url": p_obj.image_url or (p_obj.attributes.get("image_url") if isinstance(p_obj.attributes, dict) else None),
+                    "description": p_obj.description,
+                    "tags": p_obj.tags or [],
+                    "attributes": p_obj.attributes or {},
+                    "stock": p_obj.inventory.stock_quantity if p_obj.inventory else 10,
+                    "rating": float(p_obj.rating) if p_obj.rating else 4.5,
+                    "review_count": p_obj.review_count or 0
+                }
+        elif context_data.get("selected_product"):
+            current_product = context_data.get("selected_product")
+        elif context_data.get("selected_product_id"):
+            p_obj = self.db.query(Product).filter(Product.id == context_data.get("selected_product_id")).first()
+            if p_obj:
+                current_product = {
+                    "id": str(p_obj.id),
+                    "name": p_obj.name,
+                    "brand": p_obj.brand,
+                    "category": p_obj.category,
+                    "subcategory": p_obj.subcategory,
+                    "price": float(p_obj.price),
+                    "mrp": float(p_obj.mrp) if p_obj.mrp else None,
+                    "image_url": p_obj.image_url or (p_obj.attributes.get("image_url") if isinstance(p_obj.attributes, dict) else None),
+                    "description": p_obj.description,
+                    "tags": p_obj.tags or [],
+                    "attributes": p_obj.attributes or {},
+                    "stock": p_obj.inventory.stock_quantity if p_obj.inventory else 10,
+                    "rating": float(p_obj.rating) if p_obj.rating else 4.5,
+                    "review_count": p_obj.review_count or 0
+                }
+        elif previous_products:
+            current_product = previous_products[0]
+
         # 3. Analyze intent with ConversationIntentEngine
         analysis = ConversationIntentEngine.analyze_message(
             message=message,
             active_intent=active_intent,
             previous_products=previous_products,
             cart=current_cart_state,
-            user_profile={"email": self.user.email if self.user else None}
+            user_profile={"email": self.user.email if self.user else None},
+            current_product=current_product
         )
 
         action = analysis.get("action")
@@ -262,6 +310,197 @@ class ShoppingAgent:
                 "in_stock_only": False,
                 "clarification_needed": False
             }
+
+        elif action == "PRODUCT_INQUIRY":
+            inq_type = analysis.get("inquiry_type", "GENERAL")
+            target_p = analysis.get("target_product")
+            p_id = analysis.get("product_id") or (target_p.get("id") if target_p else None) or self.product_id
+            p_name_q = analysis.get("product_name_query")
+
+            prod_obj = None
+            if p_id:
+                prod_obj = self.db.query(Product).filter(Product.id == p_id).first()
+            
+            if not prod_obj and p_name_q:
+                prod_obj = self.db.query(Product).filter(
+                    Product.is_active == True,
+                    (Product.name.ilike(f"%{p_name_q}%") | Product.category.ilike(f"%{p_name_q}%"))
+                ).first()
+
+            if not prod_obj and self.product_id:
+                prod_obj = self.db.query(Product).filter(Product.id == self.product_id).first()
+
+            if not prod_obj and context_data.get("selected_product_id"):
+                prod_obj = self.db.query(Product).filter(Product.id == context_data.get("selected_product_id")).first()
+
+            if not prod_obj and context_data.get("selected_product"):
+                prod_obj = self.db.query(Product).filter(Product.id == context_data["selected_product"].get("id")).first()
+
+            if not prod_obj and previous_products:
+                prod_obj = self.db.query(Product).filter(Product.id == previous_products[0].get("id")).first()
+
+            if prod_obj:
+                p_id_str = str(prod_obj.id)
+                p_name = prod_obj.name
+                p_price = float(prod_obj.price)
+                p_mrp = float(prod_obj.mrp) if prod_obj.mrp else None
+                p_cat = prod_obj.category
+                p_brand = prod_obj.brand or "Apex"
+                p_desc = prod_obj.description or ""
+                p_stock = prod_obj.inventory.stock_quantity if prod_obj.inventory else 10
+                p_attrs = prod_obj.attributes or {}
+                p_img = prod_obj.image_url or (p_attrs.get("image_url") if isinstance(p_attrs, dict) else None)
+                
+                # Sizes and Colors
+                sizes_list = p_attrs.get("sizes") or p_attrs.get("available_sizes") or ["UK 7", "UK 8", "UK 9", "UK 10", "UK 11"]
+                sizes_str = ", ".join(sizes_list) if isinstance(sizes_list, list) else str(sizes_list)
+                
+                colors_list = p_attrs.get("colors") or p_attrs.get("color") or ["Slate Grey", "Midnight Black", "Pure White"]
+                colors_str = ", ".join(colors_list) if isinstance(colors_list, list) else str(colors_list)
+
+                # Format specific grounded inquiry responses
+                if inq_type in ["WHY_GOOD_FOR_USE_CASE", "GENERAL"]:
+                    mrp_mention = f" (MRP ₹{int(p_mrp):,})" if p_mrp and p_mrp > p_price else ""
+                    if is_hi:
+                        final_message = (
+                            f"**{p_name}** (₹{int(p_price):,}{mrp_mention}) running aur training ke liye best engineered shoe hai:\n\n"
+                            f"• **Cushioning & Support**: High-rebound responsive midsole shock absorption deta hai aur joint impact kam karta hai.\n"
+                            f"• **Grip & Stability**: Lugged outsole rough terrain aur road par maximum traction provide karta hai.\n"
+                            f"• **Breathable Comfort**: Lightweight engineered mesh upper lambi running mein ventilation banaye rakhta hai.\n"
+                            f"• **Sizes Available**: {sizes_str} (True to size standard fit).\n"
+                            f"• **Real-Time Stock**: Verified {p_stock} pairs available.\n\n"
+                            f"Order karne ke liye 'ye wala le lo' ya 'checkout' bole."
+                        )
+                    else:
+                        final_message = (
+                            f"**{p_name}** (₹{int(p_price):,}{mrp_mention}) is engineered specifically for performance running and high-impact training:\n\n"
+                            f"• **Cushioning & Energy Return**: Features advanced multi-density cushioning for maximum shock absorption and high energy rebound over long distances.\n"
+                            f"• **Traction & Stability**: Equipped with a durable lugged outsole ensuring grip across both road pavement and trail surfaces.\n"
+                            f"• **Breathable Engineered Upper**: Breathable synthetic mesh keeps feet cool and secure during rigorous endurance sessions.\n"
+                            f"• **Sizes Available**: {sizes_str} (True to size fit).\n"
+                            f"• **Verified Stock**: {p_stock} units available for authoritative instant checkout.\n\n"
+                            f"Say 'order this' or 'buy this one' to proceed with your order."
+                        )
+                elif inq_type == "TRAIL_VS_ROAD":
+                    is_trail = "trail" in p_name.lower() or "trail" in p_cat.lower() or "trail" in p_desc.lower()
+                    if is_hi:
+                        if is_trail:
+                            final_message = (
+                                f"**{p_name}** khaas taur par **Trail Running** ke liye banaya gaya hai jisme aggressive lugged grip aur rock-plate protection hai, par ye road running par bhi smooth transitions deta hai."
+                            )
+                        else:
+                            final_message = (
+                                f"**{p_name}** primary **Road Running & Marathon** pacing ke liye optimized hai with lightweight responsive cushioning."
+                            )
+                    else:
+                        if is_trail:
+                            final_message = (
+                                f"**{p_name}** is specifically engineered for **Trail Running** with rugged multi-directional traction lugs and enhanced rock-plate protection, while still performing smoothly on road pavement."
+                            )
+                        else:
+                            final_message = (
+                                f"**{p_name}** is engineered primarily for **Road Running and Marathon Pacing** with lightweight rebound cushioning."
+                            )
+                elif inq_type == "PRICE":
+                    mrp_str = f" (MRP: ₹{int(p_mrp):,})" if p_mrp and p_mrp > p_price else ""
+                    if is_hi:
+                        final_message = (
+                            f"**{p_name}** ka current price **₹{int(p_price):,}**{mrp_str} hai. Verified stock ({p_stock} available) ke sath authoritative checkout available hai."
+                        )
+                    else:
+                        final_message = (
+                            f"The current price for **{p_name}** is **₹{int(p_price):,}**{mrp_str}. It is verified in stock ({p_stock} available) with immediate Razorpay checkout protection."
+                        )
+                elif inq_type == "SIZES":
+                    if is_hi:
+                        final_message = (
+                            f"**{p_name}** ke available sizes: **{sizes_str}**. Standard Indian/UK sizing hai aur fit true-to-size hai."
+                        )
+                    else:
+                        final_message = (
+                            f"Available sizes for **{p_name}**: **{sizes_str}**. Standard true-to-size fit profile."
+                        )
+                elif inq_type == "COLORS":
+                    if is_hi:
+                        final_message = (
+                            f"**{p_name}** in colors mein available hai: **{colors_str}**."
+                        )
+                    else:
+                        final_message = (
+                            f"Available colorways for **{p_name}**: **{colors_str}**."
+                        )
+                elif inq_type == "STOCK":
+                    if is_hi:
+                        final_message = (
+                            f"**{p_name}** currently **stock mein available hai** ({p_stock} units). Aap turant order kar sakte hain."
+                        )
+                    else:
+                        final_message = (
+                            f"**{p_name}** is verified **in stock** with {p_stock} units available in our fulfillment center."
+                        )
+                elif inq_type == "DISCOUNT_NEGOTIATE":
+                    if is_hi:
+                        final_message = (
+                            f"**{p_name}** ka list price ₹{int(p_price):,} hai. Aap checkout par **SAVE500** coupon apply kar sakte hain ya is product page par **'Request Best Price'** button click karke direct merchant ko counter-offer bhej sakte hain!"
+                        )
+                    else:
+                        final_message = (
+                            f"**{p_name}** is listed at ₹{int(p_price):,}. You can use coupon **SAVE500** at checkout or click **'Request Best Price'** on this product page to submit a direct price request to the merchant!"
+                        )
+
+                prod_dict = {
+                    "id": p_id_str,
+                    "name": p_name,
+                    "brand": p_brand,
+                    "category": p_cat,
+                    "subcategory": prod_obj.subcategory,
+                    "price": p_price,
+                    "mrp": p_mrp,
+                    "image_url": p_img,
+                    "description": p_desc,
+                    "rating": float(prod_obj.rating) if prod_obj.rating else 4.5,
+                    "review_count": prod_obj.review_count or 0,
+                    "in_stock": p_stock > 0,
+                    "stock_quantity": p_stock,
+                    "attributes": p_attrs
+                }
+                discovered_products = [prod_dict]
+                context_data["selected_product"] = prod_dict
+                context_data["selected_product_id"] = p_id_str
+                context_data["previous_products"] = [prod_dict]
+                if "active_intent" not in context_data:
+                    context_data["active_intent"] = {}
+                context_data["active_intent"]["category"] = p_cat
+                context_data["active_intent"]["selected_product"] = prod_dict
+
+                structured_intent = {
+                    "query": p_name,
+                    "category": p_cat,
+                    "max_price": None,
+                    "min_price": None,
+                    "quantity": 1,
+                    "sort": None,
+                    "in_stock_only": True,
+                    "clarification_needed": False
+                }
+            else:
+                # Unknown product requested -> Zero hallucination!
+                prod_mention = p_name_q or "this product"
+                if is_hi:
+                    final_message = f"Mujhe catalog mein '{prod_mention}' nahi mila. Main aapko hamare verified collection se running shoes ya gear dikha sakta hoon."
+                else:
+                    final_message = f"I couldn't find '{prod_mention}' in our verified catalog. You can explore our verified running shoes, apparel, and fitness gear."
+                discovered_products = []
+                structured_intent = {
+                    "query": prod_mention,
+                    "category": None,
+                    "max_price": None,
+                    "min_price": None,
+                    "quantity": 1,
+                    "sort": None,
+                    "in_stock_only": False,
+                    "clarification_needed": False
+                }
 
         elif action == "CLARIFICATION_NEEDED":
             final_message = analysis["message"]

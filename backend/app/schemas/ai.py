@@ -25,6 +25,7 @@ class ChatRequest(BaseModel):
     message: str
     merchant_id: Optional[str] = None
     trace_id: Optional[str] = None
+    product_id: Optional[str] = None
     delivery_address: Optional[Dict[str, Any]] = None
     applied_coupon: Optional[str] = None
     applied_voucher: Optional[str] = None
@@ -66,6 +67,7 @@ class OrderReview(BaseModel):
 class ChatResponse(BaseModel):
     session_id: str
     message: str
+    reply: Optional[str] = None
     products: List[Dict[str, Any]] = []
     cart: Dict[str, Any] = {}
     recommendations: List[Dict[str, Any]] = []

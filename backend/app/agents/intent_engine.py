@@ -251,13 +251,136 @@ class ConversationIntentEngine:
         return None
 
     @classmethod
+    def _detect_product_inquiry(
+        cls,
+        normalized: str,
+        message: str,
+        active_intent: Dict[str, Any],
+        previous_products: List[Dict[str, Any]],
+        current_product: Optional[Dict[str, Any]] = None
+    ) -> Optional[Tuple[str, Optional[Dict[str, Any]], Optional[str], Optional[str]]]:
+        """
+        Determines if user message is inquiring about a product's details, specs, why it's good, price, sizes, etc.
+        Returns: (inquiry_type, target_product_dict, product_name_query, product_id) or None
+        """
+        inquiry_type = None
+
+        why_good_phrases = [
+            "why is it good", "why is this good", "why it is good", "why it's good", "why its good",
+            "why is good", "why good", "is it good for", "is this good for", "suitable for",
+            "good for running", "good for trail", "good for marathon", "good for gym", "good for workouts",
+            "kaisa hai", "kaisa product hai", "kaisi hai", "running ke liye kaisa", "trail ke liye kaisa",
+            "gym ke liye kaisa", "kyu achha", "kyu accha", "kyun achha", "kyun accha", "kya ye achha", "kya ye accha",
+            "why should i buy", "how is this", "how is it"
+        ]
+        trail_road_phrases = [
+            "trail running or road running", "trail or road", "trail vs road", "better for trail", "better for road",
+            "off-road", "off road", "trail ya road", "road ya trail", "rough terrain", "terrain kaisa"
+        ]
+        price_phrases = [
+            "what is the price", "what is its price", "price of this", "what is the cost", "how much is it",
+            "how much does it cost", "how much is this", "price kya hai", "kitne ka hai", "kitna price",
+            "cost kya hai", "mrp kya hai", "price kitna hai", "rate kya hai", "what price", "price of this product",
+            "price of"
+        ]
+        size_phrases = [
+            "what sizes", "which sizes", "sizes available", "size available", "available sizes", "sizes are available",
+            "what size", "size kya hai", "sizes kya hain", "sizes", "size mil jayega", "konse size", "size chart", "size options"
+        ]
+        color_phrases = [
+            "what colors", "what colours", "which colors", "which colours", "colors available", "colours available",
+            "available colors", "available colours", "color kya hai", "colour kya hai", "colors kya hain", "colours kya hain"
+        ]
+        stock_phrases = [
+            "is it in stock", "in stock", "stock kitna hai", "available hai", "kitne piece bache", "stock quantity", "how many in stock", "stock check"
+        ]
+        discount_phrases = [
+            "can i get a better price", "better price", "can i get a discount", "is there a discount", "can i negotiate",
+            "discount milega", "kam price", "sasta milega", "bargain", "discount hai kya", "best price offer", "negotiate kar sakte hain", "ask for better price"
+        ]
+        general_phrases = [
+            "tell me more about", "tell me more", "tell me about", "details about", "explain this product", "more info",
+            "information about", "kuch batao", "aur batao", "details batao", "features kya hain", "specifications", "specs",
+            "tell me about this product", "about this product", "describe this"
+        ]
+
+        if any(p in normalized for p in trail_road_phrases):
+            inquiry_type = "TRAIL_VS_ROAD"
+        elif any(p in normalized for p in why_good_phrases):
+            inquiry_type = "WHY_GOOD_FOR_USE_CASE"
+        elif any(p in normalized for p in price_phrases):
+            inquiry_type = "PRICE"
+        elif any(p in normalized for p in size_phrases):
+            inquiry_type = "SIZES"
+        elif any(p in normalized for p in color_phrases):
+            inquiry_type = "COLORS"
+        elif any(p in normalized for p in stock_phrases):
+            inquiry_type = "STOCK"
+        elif any(p in normalized for p in discount_phrases):
+            inquiry_type = "DISCOUNT_NEGOTIATE"
+        elif any(p in normalized for p in general_phrases):
+            inquiry_type = "GENERAL"
+
+        # Check for Named Product in message
+        matched_named_prod = None
+        for prod_name, aliases in cls.PRODUCT_NAME_PATTERNS:
+            if any(alias in normalized for alias in aliases):
+                matched_named_prod = prod_name
+                break
+
+        # Check for Explicit UUID in message
+        uuid_match = re.search(r'\b([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|prod_[a-z0-9_]+)\b', message, re.IGNORECASE)
+        explicit_uuid = uuid_match.group(1) if uuid_match else None
+
+        # Check for Contextual / Deictic reference
+        has_deictic = any(p in normalized for p in [
+            "this product", "this shoe", "this item", "this gear", "this watch", "this bag", "this shirt",
+            "this bottle", "this one", "this", "it", "ye product", "ye shoe", "ye wala", "ye", "isko", "iska", "iske", "about it"
+        ]) or (current_product is not None)
+
+        context_prod = current_product or (active_intent.get("selected_product") if isinstance(active_intent.get("selected_product"), dict) else (previous_products[0] if previous_products else None))
+
+        if not inquiry_type:
+            if any(normalized.startswith(p) for p in ["tell me", "details of", "specs of", "features of", "explain"]):
+                inquiry_type = "GENERAL"
+
+        if inquiry_type:
+            if matched_named_prod:
+                return (inquiry_type, None, matched_named_prod, None)
+            if explicit_uuid:
+                return (inquiry_type, None, None, explicit_uuid)
+            if (has_deictic or current_product) and context_prod:
+                return (inquiry_type, context_prod, context_prod.get("name"), context_prod.get("id"))
+
+            extracted = None
+            for p in ["tell me more about", "tell me about", "details about", "more about", "why is", "why are"]:
+                if p in normalized:
+                    parts = normalized.split(p, 1)
+                    if len(parts) > 1:
+                        cand = parts[1].split("and why")[0].split("why")[0].split("for running")[0].strip()
+                        if cand:
+                            extracted = cand.title()
+                            break
+            if extracted:
+                return (inquiry_type, None, extracted, None)
+
+            if context_prod:
+                return (inquiry_type, context_prod, context_prod.get("name"), context_prod.get("id"))
+
+        if matched_named_prod and not any(w in normalized for w in ["dikhao", "search", "options", "find", "show", "list", "under", "andar", "budget", "ke andar"]):
+            return ("GENERAL", None, matched_named_prod, None)
+
+        return None
+
+    @classmethod
     def analyze_message(
         cls,
         message: str,
         active_intent: Optional[Dict[str, Any]] = None,
         previous_products: Optional[List[Dict[str, Any]]] = None,
         cart: Optional[Dict[str, Any]] = None,
-        user_profile: Optional[Dict[str, Any]] = None
+        user_profile: Optional[Dict[str, Any]] = None,
+        current_product: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         normalized, detected_lang = cls.normalize_text(message)
         active_intent = active_intent or {}
@@ -575,6 +698,28 @@ class ConversationIntentEngine:
         if any(p in normalized for p in ["remove", "hata do", "delete", "nikal do"]):
             return {
                 "action": "REMOVE_FROM_CART",
+                "active_intent": active_intent,
+                "language": lang
+            }
+
+        # 6.5 Check for Direct Product Questions, Explanations, Specs, and Attribute Inquiries
+        # (e.g. "Tell me more about Air Cushion Trail Running Shoes and why it is good for Running.",
+        # "Tell me more about this product.", "Why is it good for running?", "What is the price?", "What sizes are available?", "Is this better for trail running or road running?")
+        inquiry_res = cls._detect_product_inquiry(
+            normalized=normalized,
+            message=message,
+            active_intent=active_intent,
+            previous_products=previous_products,
+            current_product=current_product
+        )
+        if inquiry_res:
+            inq_type, target_p, p_name_query, p_id = inquiry_res
+            return {
+                "action": "PRODUCT_INQUIRY",
+                "inquiry_type": inq_type,
+                "target_product": target_p,
+                "product_name_query": p_name_query,
+                "product_id": p_id,
                 "active_intent": active_intent,
                 "language": lang
             }

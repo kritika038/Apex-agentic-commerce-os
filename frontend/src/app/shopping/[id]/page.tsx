@@ -534,14 +534,14 @@ export default function ProductDetailPage() {
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
       const res = await apiClient.post(
         '/ai/chat',
-        { session_id: sessionId, message: messageText },
+        { session_id: sessionId, message: messageText, product_id: product?.id },
         { headers }
       );
 
       const aiResponse = res.data;
       const assistantMsg: AIMessage = {
         role: 'assistant',
-        content: aiResponse.reply || "I've reviewed the catalog.",
+        content: aiResponse.reply || aiResponse.message || "I've reviewed the catalog.",
         recommendations: (aiResponse.products || []).map((p: Record<string, unknown>) => ({
           id: String(p.id),
           name: String(p.name),

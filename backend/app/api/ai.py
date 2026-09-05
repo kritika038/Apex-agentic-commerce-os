@@ -46,6 +46,7 @@ def _resolve_merchant(db: Session, merchant_id: Optional[str] = None) -> Merchan
     return merchant
 
 @router.post("/shopping", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse)
 def ai_shopping_endpoint(
     req: ChatRequest,
     db: Session = Depends(get_db),
@@ -62,7 +63,8 @@ def ai_shopping_endpoint(
         delivery_address=req.delivery_address,
         applied_coupon=req.applied_coupon,
         applied_voucher=req.applied_voucher,
-        use_coins=req.use_coins
+        use_coins=req.use_coins,
+        product_id=req.product_id
     )
     
     try:
@@ -79,6 +81,7 @@ def ai_shopping_endpoint(
         return ChatResponse(
             session_id=response.session_id,
             message=response.message,
+            reply=response.message,
             products=response.products,
             cart=response.cart,
             recommendations=recs,
